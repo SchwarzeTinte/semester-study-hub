@@ -1,0 +1,4574 @@
+﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  Archive,
+  ArrowLeft,
+  BookOpen,
+  CalendarDays,
+  CheckCircle2,
+  ClipboardList,
+  Download,
+  Eye,
+  FileText,
+  FolderOpen,
+  GraduationCap,
+  LayoutDashboard,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Search,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
+import { isSupabaseConfigured, supabase } from "./lib/supabase";
+
+const STORAGE_KEY = "semester-study-hub-v3";
+const REVIEW_STORAGE_KEY = "semester-review-hub-v1";
+const LEGACY_KEYS = ["semester-study-hub-v2", "semester-study-hub-v1"];
+const DB_NAME = "semester-study-hub-db";
+const STORE_NAME = "course-files";
+const TERM_START = "2026-04-13";
+const TERM_END = "2026-07-17";
+const DAY_ORDER = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"];
+const FILE_CATEGORIES = ["课堂文件", "笔记", "作业", "其他"];
+const TIME_RANGE_REGEX = /^([01]?\d|2[0-3]):([0-5]\d)\s*-\s*([01]?\d|2[0-3]):([0-5]\d)$/;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const STORAGE_BUCKET = "study-files";
+
+const STARTER_COURSES = [
+  { name: "Multimediaprogrammierung", kind: "Vorlesung", weekday: "Montag", time: "10:00-12:00", room: "S 002 · Schellingstr. 3" },
+  { name: "Statistik II", kind: "Vorlesung", weekday: "Montag", time: "12:00-14:00", room: "A 240 · Geschw.-Scholl-Pl. 1" },
+  { name: "Algorithmen und Datenstrukturen", kind: "Vorlesung", weekday: "Dienstag", time: "08:00-11:00", room: "Große Aula (E120)" },
+  { name: "Logik und Diskrete Strukturen", kind: "Vorlesung", weekday: "Dienstag", time: "11:00-14:00", room: "Große Aula (E120)" },
+  { name: "Formale Sprachen und Komplexität", kind: "Vorlesung", weekday: "Dienstag", time: "14:00-17:00", room: "A 240" },
+  { name: "Grundlagen des Maschinellen Lernens", kind: "Vorlesung", weekday: "Dienstag", time: "14:00-16:00", room: "M 110" },
+  { name: "Statistik II", kind: "Übung", weekday: "Dienstag", time: "16:00-18:00", room: "E 004" },
+  { name: "Implementation of Database Systems", kind: "Vorlesung", weekday: "Mittwoch", time: "09:00-12:00", room: "211 · Amalienstr. 73A" },
+  { name: "Einführung in das maschinelle Lernen", kind: "Vorlesung", weekday: "Mittwoch", time: "10:00-12:00", room: "S 006 · Schellingstr. 3" },
+  { name: "Statistik II", kind: "Übung", weekday: "Mittwoch", time: "14:00-16:00", room: "E 004" },
+  { name: "Fortgeschrittene Statistische Software", kind: "Vorlesung", weekday: "Donnerstag", time: "10:00-12:00", room: "S 001 · Schellingstr. 3" },
+  { name: "Statistik II", kind: "Vorlesung", weekday: "Donnerstag", time: "12:00-14:00", room: "A 240" },
+  { name: "Rechnerarchitektur", kind: "Vorlesung", weekday: "Donnerstag", time: "14:00-17:00", room: "B 201" },
+  { name: "Rechnernetze und Verteilte Systeme", kind: "Vorlesung", weekday: "Freitag", time: "09:00-12:00", room: "B 001 · Oettingenstr. 67" },
+];
+
+const EMPTY_SCHEDULE_ENTRY = {
+  weekday: "Montag",
+  time: "",
+};
+
+const EMPTY_COURSE_FORM = {
+  name: "",
+  teacher: "",
+  kind: "Vorlesung",
+  scheduleEntries: [{ ...EMPTY_SCHEDULE_ENTRY }],
+  room: "",
+};
+
+const EMPTY_REVIEW_FORM = {
+  sourceCourseId: "",
+};
+
+function uid() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function classNames(...arr) {
+  return arr.filter(Boolean).join(" ");
+}
+
+function normalizeWeekdays(value) {
+  if (Array.isArray(value) && value.length) {
+    return DAY_ORDER.filter((day) => value.includes(day));
+  }
+  if (typeof value === "string" && value) {
+    return DAY_ORDER.includes(value) ? [value] : ["Montag"];
+  }
+  return ["Montag"];
+}
+
+function formatWeekdays(value) {
+  return normalizeWeekdays(value).join(" / ");
+}
+
+function parseSerializedScheduleEntries(value = "") {
+  if (typeof value !== "string" || !value.includes("||")) return [];
+  return value
+    .split("||")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const [weekdayPart, ...timeParts] = item.split("@");
+      return {
+        weekday: DAY_ORDER.includes(weekdayPart) ? weekdayPart : "Montag",
+        time: formatTimeRangeInput(timeParts.join("@").trim()),
+      };
+    });
+}
+
+function normalizeScheduleEntries(scheduleEntries, weekdays, time) {
+  if (Array.isArray(scheduleEntries) && scheduleEntries.length) {
+    return scheduleEntries.map((entry) => ({
+      weekday: DAY_ORDER.includes(entry?.weekday) ? entry.weekday : "Montag",
+      time: formatTimeRangeInput(entry?.time || ""),
+    }));
+  }
+
+  const parsedSerializedEntries = parseSerializedScheduleEntries(time);
+  if (parsedSerializedEntries.length) {
+    return parsedSerializedEntries;
+  }
+
+  const normalizedWeekdays = normalizeWeekdays(weekdays);
+  return normalizedWeekdays.map((weekday) => ({
+    weekday,
+    time: formatTimeRangeInput(time || ""),
+  }));
+}
+
+function serializeScheduleEntries(scheduleEntries = []) {
+  return scheduleEntries
+    .map((entry) => `${entry.weekday}@${formatTimeRangeInput(entry.time || "")}`)
+    .join("||");
+}
+
+function getScheduleWeekdays(scheduleEntries = []) {
+  return DAY_ORDER.filter((day) => scheduleEntries.some((entry) => entry.weekday === day));
+}
+
+function formatScheduleEntries(scheduleEntries = []) {
+  return scheduleEntries
+    .map((entry) => `${entry.weekday} · ${entry.time || "时间待定"}`)
+    .join(" / ");
+}
+
+function getPrimaryScheduleEntry(scheduleEntries = []) {
+  return scheduleEntries[0] || { ...EMPTY_SCHEDULE_ENTRY };
+}
+
+function getEntityScheduleEntries(entity) {
+  return normalizeScheduleEntries(entity?.scheduleEntries, entity?.weekdays ?? entity?.weekday, entity?.time || "");
+}
+
+function getEntityScheduleLabel(entity) {
+  return formatScheduleEntries(getEntityScheduleEntries(entity));
+}
+
+function isUuid(value) {
+  return typeof value === "string" && UUID_REGEX.test(value);
+}
+
+function withTimeout(promise, ms, errorMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      window.setTimeout(() => reject(new Error(errorMessage)), ms);
+    }),
+  ]);
+}
+
+function formatDate(input) {
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+}
+
+function formatDateTime(input) {
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatBytes(bytes = 0) {
+  if (!bytes) return "0 B";
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), sizes.length - 1);
+  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${sizes[i]}`;
+}
+
+function formatTimeRangeInput(value = "") {
+  const digits = value.replace(/\D/g, "").slice(0, 8);
+  if (!digits) return "";
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}:${digits.slice(2)}`;
+
+  const start = `${digits.slice(0, 2)}:${digits.slice(2, 4)}`;
+  const endDigits = digits.slice(4);
+
+  if (endDigits.length <= 2) {
+    return `${start} - ${endDigits}`;
+  }
+
+  return `${start} - ${endDigits.slice(0, 2)}${endDigits.length > 2 ? `:${endDigits.slice(2, 4)}` : ""}`;
+}
+
+function parseTimeToMinutes(value) {
+  const [hours, minutes] = value.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function validateCourseForm(form) {
+  const errors = {};
+  const name = form.name.trim();
+  const scheduleEntries = normalizeScheduleEntries(form.scheduleEntries, form.weekdays, form.time);
+
+  if (!name) {
+    errors.name = "请输入课程名称。";
+  }
+
+  if (!scheduleEntries.length) {
+    errors.scheduleEntries = "至少添加一条上课安排。";
+  }
+
+  for (const entry of scheduleEntries) {
+    if (!DAY_ORDER.includes(entry.weekday)) {
+      errors.scheduleEntries = "每条上课安排都要选择星期。";
+      break;
+    }
+
+    const time = (entry.time || "").trim();
+    if (time) {
+      const match = time.match(TIME_RANGE_REGEX);
+      if (!match) {
+        errors.scheduleEntries = "每条时间格式都应为 xx:xx - xx:xx。";
+        break;
+      }
+      const startMinutes = parseTimeToMinutes(`${match[1]}:${match[2]}`);
+      const endMinutes = parseTimeToMinutes(`${match[3]}:${match[4]}`);
+      if (endMinutes <= startMinutes) {
+        errors.scheduleEntries = "每条上课安排的结束时间都必须晚于开始时间。";
+        break;
+      }
+    }
+  }
+
+  return errors;
+}
+
+function validateReviewForm(form) {
+  const errors = {};
+  if (!form.sourceCourseId) {
+    errors.sourceCourseId = "请选择一门课程来创建复习条目。";
+  }
+
+  return errors;
+}
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function putFileRecord(record) {
+  const db = await openDB();
+  const arrayBuffer = await record.blob.arrayBuffer();
+  const newRecord = { ...record, blob: arrayBuffer };
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.put(newRecord);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getFileRecord(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const req = tx.objectStore(STORE_NAME).get(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function deleteFileRecord(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).delete(id);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function buildTermWeeks() {
+  const start = new Date(`${TERM_START}T00:00:00`);
+  const end = new Date(`${TERM_END}T00:00:00`);
+  const weeks = [];
+  let cursor = new Date(start);
+  let weekNumber = 1;
+
+  while (cursor <= end) {
+    const weekStart = new Date(cursor);
+    const weekEnd = new Date(cursor);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+    weeks.push({
+      weekNumber,
+      start: weekStart.toISOString(),
+      end: weekEnd.toISOString(),
+      label: `W${weekNumber} · ${formatDate(weekStart)} - ${formatDate(weekEnd)}`,
+    });
+    cursor.setDate(cursor.getDate() + 7);
+    weekNumber += 1;
+  }
+
+  return weeks;
+}
+
+const TERM_WEEKS = buildTermWeeks();
+
+function buildWeeklyRecords() {
+  return TERM_WEEKS.map((week) => ({
+    id: uid(),
+    weekNumber: week.weekNumber,
+    label: week.label,
+    lectureDone: false,
+    homeworkDone: false,
+  }));
+}
+
+function buildReviewWeeklyRecords() {
+  return TERM_WEEKS.map((week) => ({
+    id: uid(),
+    weekNumber: week.weekNumber,
+    label: week.label,
+    reviewDone: false,
+  }));
+}
+
+function makeCourse(template = {}) {
+  const scheduleEntries = normalizeScheduleEntries(template.scheduleEntries, template.weekdays ?? template.weekday, template.time || "");
+  return {
+    id: template.id || uid(),
+    name: template.name || "",
+    teacher: template.teacher || "",
+    kind: template.kind || "Vorlesung",
+    scheduleEntries,
+    weekdays: getScheduleWeekdays(scheduleEntries),
+    time: serializeScheduleEntries(scheduleEntries),
+    room: template.room || "",
+    quickNotes: template.quickNotes || "",
+    files: template.files || [],
+    archived: Boolean(template.archived),
+    archiveMarked: Boolean(template.archiveMarked),
+    createdAt: template.createdAt || new Date().toISOString(),
+    weeklyRecords: template.weeklyRecords || buildWeeklyRecords(),
+  };
+}
+
+function makeReviewItem(template = {}) {
+  const scheduleEntries = normalizeScheduleEntries(template.scheduleEntries, template.weekdays ?? template.weekday, template.time || "");
+  return {
+    id: template.id || uid(),
+    name: template.name || "",
+    subject: template.subject || "",
+    sourceCourseId: template.sourceCourseId || "",
+    scheduleEntries,
+    weekdays: getScheduleWeekdays(scheduleEntries),
+    time: serializeScheduleEntries(scheduleEntries),
+    room: template.room || "",
+    notes: template.notes || "",
+    files: (template.files || []).map((file) => ({ ...file, reviewed: Boolean(file.reviewed) })),
+    archived: Boolean(template.archived),
+    archiveMarked: Boolean(template.archiveMarked),
+    createdAt: template.createdAt || new Date().toISOString(),
+    weeklyRecords: template.weeklyRecords || buildReviewWeeklyRecords(),
+  };
+}
+
+function normalizeCourse(course) {
+  if (!course) return null;
+  if (Array.isArray(course.weeklyRecords)) {
+    return makeCourse({
+      ...course,
+      weeklyRecords: TERM_WEEKS.map((week, index) => ({
+        id: course.weeklyRecords[index]?.id || uid(),
+        weekNumber: week.weekNumber,
+        label: week.label,
+        lectureDone: Boolean(course.weeklyRecords[index]?.lectureDone),
+        homeworkDone: Boolean(course.weeklyRecords[index]?.homeworkDone),
+      })),
+    });
+  }
+
+  const lectures = Array.isArray(course.lectures) ? course.lectures : [];
+  const assignments = Array.isArray(course.assignments) ? course.assignments : [];
+
+  return makeCourse({
+    ...course,
+    weeklyRecords: TERM_WEEKS.map((week, index) => ({
+      id: uid(),
+      weekNumber: week.weekNumber,
+      label: week.label,
+      lectureDone: Boolean(lectures[index]?.done),
+      homeworkDone: Boolean(assignments[index]?.done),
+    })),
+  });
+}
+
+function normalizeReviewItem(item) {
+  if (!item) return null;
+  if (Array.isArray(item.weeklyRecords)) {
+    return makeReviewItem({
+      ...item,
+      weeklyRecords: TERM_WEEKS.map((week, index) => ({
+        id: item.weeklyRecords[index]?.id || uid(),
+        weekNumber: week.weekNumber,
+        label: week.label,
+        reviewDone: Boolean(item.weeklyRecords[index]?.reviewDone),
+      })),
+    });
+  }
+
+  return makeReviewItem({
+    ...item,
+    weeklyRecords: buildReviewWeeklyRecords(),
+  });
+}
+
+function getCurrentWeekNumber(now = new Date()) {
+  const start = new Date(`${TERM_START}T00:00:00`);
+  const end = new Date(`${TERM_END}T23:59:59`);
+  if (now < start) return 1;
+  if (now > end) return TERM_WEEKS.length;
+  const diffDays = Math.floor((now - start) / (1000 * 60 * 60 * 24));
+  return Math.min(TERM_WEEKS.length, Math.floor(diffDays / 7) + 1);
+}
+
+function getMillisecondsUntilNextDay(reference = new Date()) {
+  const nextDay = new Date(reference);
+  nextDay.setHours(24, 0, 1, 0);
+  return Math.max(1000, nextDay.getTime() - reference.getTime());
+}
+
+function courseSort(a, b) {
+  const scheduleA = normalizeScheduleEntries(a.scheduleEntries, a.weekdays ?? a.weekday, a.time || "");
+  const scheduleB = normalizeScheduleEntries(b.scheduleEntries, b.weekdays ?? b.weekday, b.time || "");
+  const dayA = DAY_ORDER.indexOf(getPrimaryScheduleEntry(scheduleA).weekday);
+  const dayB = DAY_ORDER.indexOf(getPrimaryScheduleEntry(scheduleB).weekday);
+  if (dayA !== dayB) return dayA - dayB;
+  return (getPrimaryScheduleEntry(scheduleA).time || "").localeCompare(getPrimaryScheduleEntry(scheduleB).time || "");
+}
+
+function findWeeklyRecord(course, weekNumber) {
+  return course.weeklyRecords.find((record) => record.weekNumber === weekNumber);
+}
+
+function calcCourseProgress(course) {
+  const done = course.weeklyRecords.filter((record) => record.lectureDone && record.homeworkDone).length;
+  return Math.round((done / course.weeklyRecords.length) * 100);
+}
+
+function calcReviewProgress(reviewItem) {
+  const total = reviewItem.files?.length || 0;
+  if (!total) return 0;
+  const done = reviewItem.files.filter((file) => file.reviewed).length;
+  return Math.round((done / total) * 100);
+}
+
+function isCourseArchiveMarked(course) {
+  return Boolean(course.archiveMarked) || calcCourseProgress(course) === 100;
+}
+
+function isReviewArchiveMarked(reviewItem) {
+  return Boolean(reviewItem.archiveMarked) || calcReviewProgress(reviewItem) === 100;
+}
+
+function groupFiles(files = []) {
+  return FILE_CATEGORIES.map((category) => ({
+    category,
+    items: files.filter((file) => file.category === category),
+  }));
+}
+
+function readLocalCoursesFromStorage() {
+  try {
+    const sources = [localStorage.getItem(STORAGE_KEY), ...LEGACY_KEYS.map((key) => localStorage.getItem(key))].filter(Boolean);
+    const source = sources[0];
+    if (!source) return [];
+    const parsed = JSON.parse(source);
+    return Array.isArray(parsed) ? parsed.map(normalizeCourse).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function readLocalReviewsFromStorage() {
+  try {
+    const source = localStorage.getItem(REVIEW_STORAGE_KEY);
+    if (!source) return [];
+    const parsed = JSON.parse(source);
+    return Array.isArray(parsed) ? parsed.map(normalizeReviewItem).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildEntityFilesMap(items = []) {
+  return items.reduce((acc, item) => {
+    acc[item.id] = item.files || [];
+    return acc;
+  }, {});
+}
+
+function mergeFileLists(primary = [], secondary = []) {
+  const seen = new Set(primary.map((file) => file.id));
+  return [...primary, ...secondary.filter((file) => !seen.has(file.id))];
+}
+
+function weekdayKey(value) {
+  return normalizeWeekdays(value).join("|");
+}
+
+function courseIdentityKey(course) {
+  const scheduleEntries = normalizeScheduleEntries(course.scheduleEntries, course.weekdays ?? course.weekday, course.time || "");
+  return [
+    course.name || "",
+    course.teacher || "",
+    course.kind || "",
+    weekdayKey(getScheduleWeekdays(scheduleEntries)),
+    serializeScheduleEntries(scheduleEntries),
+    course.room || "",
+    course.archived ? "1" : "0",
+  ].join("::");
+}
+
+function reviewIdentityKey(item) {
+  const scheduleEntries = normalizeScheduleEntries(item.scheduleEntries, item.weekdays ?? item.weekday, item.time || "");
+  return [
+    item.name || "",
+    item.subject || "",
+    item.sourceCourseId || "",
+    weekdayKey(getScheduleWeekdays(scheduleEntries)),
+    serializeScheduleEntries(scheduleEntries),
+    item.room || "",
+    item.archived ? "1" : "0",
+  ].join("::");
+}
+
+function sanitizeFileName(name = "file") {
+  return name.replace(/[^\w.\-]+/g, "_");
+}
+
+function buildCourseFileMetaFromRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    mime: row.mime,
+    size: Number(row.size) || 0,
+    category: row.category,
+    uploadedAt: row.uploaded_at,
+    storagePath: row.storage_path,
+  };
+}
+
+function buildReviewFileMetaFromRow(row) {
+  return {
+    id: row.id,
+    sourceFileId: row.source_file_id || null,
+    name: row.name,
+    mime: row.mime,
+    size: Number(row.size) || 0,
+    category: row.category,
+    uploadedAt: row.uploaded_at,
+    reviewed: Boolean(row.reviewed),
+    storagePath: row.storage_path,
+  };
+}
+
+function buildCourseRowPayload(course) {
+  const scheduleEntries = normalizeScheduleEntries(course.scheduleEntries, course.weekdays ?? course.weekday, course.time || "");
+  return {
+    ...(isUuid(course.id) ? { id: course.id } : {}),
+    name: course.name || "",
+    teacher: course.teacher || "",
+    kind: course.kind || "Vorlesung",
+    weekdays: getScheduleWeekdays(scheduleEntries),
+    time: serializeScheduleEntries(scheduleEntries),
+    room: course.room || "",
+    quick_notes: course.quickNotes || "",
+    archived: Boolean(course.archived),
+    archive_marked: Boolean(course.archiveMarked),
+  };
+}
+
+function buildReviewRowPayload(item) {
+  const scheduleEntries = normalizeScheduleEntries(item.scheduleEntries, item.weekdays ?? item.weekday, item.time || "");
+  return {
+    ...(isUuid(item.id) ? { id: item.id } : {}),
+    name: item.name || "",
+    subject: item.subject || "",
+    source_course_id: isUuid(item.sourceCourseId) ? item.sourceCourseId : null,
+    weekdays: getScheduleWeekdays(scheduleEntries),
+    time: serializeScheduleEntries(scheduleEntries),
+    room: item.room || "",
+    notes: item.notes || "",
+    archived: Boolean(item.archived),
+    archive_marked: Boolean(item.archiveMarked),
+  };
+}
+
+function buildCourseWeeklyRows(courseId, weeklyRecords = []) {
+  const weeklyMap = new Map((weeklyRecords || []).map((record) => [record.weekNumber, record]));
+  return TERM_WEEKS.map((week) => {
+    const record = weeklyMap.get(week.weekNumber);
+    return {
+      ...(isUuid(record?.id) ? { id: record.id } : {}),
+      course_id: courseId,
+      week_number: week.weekNumber,
+      label: week.label,
+      lecture_done: Boolean(record?.lectureDone),
+      homework_done: Boolean(record?.homeworkDone),
+    };
+  });
+}
+
+function buildReviewWeeklyRows(reviewId, weeklyRecords = []) {
+  const weeklyMap = new Map((weeklyRecords || []).map((record) => [record.weekNumber, record]));
+  return TERM_WEEKS.map((week) => {
+    const record = weeklyMap.get(week.weekNumber);
+    return {
+      ...(isUuid(record?.id) ? { id: record.id } : {}),
+      review_id: reviewId,
+      week_number: week.weekNumber,
+      label: week.label,
+      review_done: Boolean(record?.reviewDone),
+    };
+  });
+}
+
+function hydrateCourseFromRemote(courseRow, weeklyRows = [], files = []) {
+  return makeCourse({
+    id: courseRow.id,
+    name: courseRow.name,
+    teacher: courseRow.teacher,
+    kind: courseRow.kind,
+    weekdays: courseRow.weekdays,
+    time: courseRow.time,
+    room: courseRow.room,
+    quickNotes: courseRow.quick_notes,
+    files,
+    archived: courseRow.archived,
+    archiveMarked: courseRow.archive_marked,
+    createdAt: courseRow.created_at,
+    weeklyRecords: TERM_WEEKS.map((week) => {
+      const row = weeklyRows.find((record) => record.week_number === week.weekNumber);
+      return {
+        id: row?.id || uid(),
+        weekNumber: week.weekNumber,
+        label: week.label,
+        lectureDone: Boolean(row?.lecture_done),
+        homeworkDone: Boolean(row?.homework_done),
+      };
+    }),
+  });
+}
+
+function hydrateReviewFromRemote(reviewRow, weeklyRows = [], files = []) {
+  return makeReviewItem({
+    id: reviewRow.id,
+    name: reviewRow.name,
+    subject: reviewRow.subject,
+    sourceCourseId: reviewRow.source_course_id || "",
+    weekdays: reviewRow.weekdays,
+    time: reviewRow.time,
+    room: reviewRow.room,
+    notes: reviewRow.notes,
+    files,
+    archived: reviewRow.archived,
+    archiveMarked: reviewRow.archive_marked,
+    createdAt: reviewRow.created_at,
+    weeklyRecords: TERM_WEEKS.map((week) => {
+      const row = weeklyRows.find((record) => record.week_number === week.weekNumber);
+      return {
+        id: row?.id || uid(),
+        weekNumber: week.weekNumber,
+        label: week.label,
+        reviewDone: Boolean(row?.review_done),
+      };
+    }),
+  });
+}
+
+function dedupeCourses(items = []) {
+  const byKey = new Map();
+  for (const item of items) {
+    const key = courseIdentityKey(item);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, item);
+      continue;
+    }
+
+    const mergedFiles = mergeFileLists(existing.files || [], item.files || []);
+    const existingDoneCount = (existing.weeklyRecords || []).filter((record) => record.lectureDone || record.homeworkDone).length;
+    const nextDoneCount = (item.weeklyRecords || []).filter((record) => record.lectureDone || record.homeworkDone).length;
+    const preferred = nextDoneCount > existingDoneCount || (item.createdAt || "") > (existing.createdAt || "") ? item : existing;
+    byKey.set(key, { ...preferred, files: mergedFiles });
+  }
+  return Array.from(byKey.values());
+}
+
+function dedupeReviews(items = []) {
+  const byKey = new Map();
+  for (const item of items) {
+    const key = reviewIdentityKey(item);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, item);
+      continue;
+    }
+
+    const mergedFiles = mergeFileLists(existing.files || [], item.files || []);
+    const existingReviewedCount = (existing.files || []).filter((file) => file.reviewed).length;
+    const nextReviewedCount = (item.files || []).filter((file) => file.reviewed).length;
+    const preferred = nextReviewedCount > existingReviewedCount || (item.createdAt || "") > (existing.createdAt || "") ? item : existing;
+    byKey.set(key, { ...preferred, files: mergedFiles });
+  }
+  return Array.from(byKey.values());
+}
+
+async function saveCourseToSupabaseRecord(course) {
+  if (!supabase) return course;
+  let payload = buildCourseRowPayload(course);
+
+  if (!isUuid(course.id)) {
+    const { data: existingRows, error: findError } = await supabase
+      .from("courses")
+      .select("*")
+      .eq("name", course.name || "")
+      .eq("kind", course.kind || "Vorlesung")
+      .eq("time", payload.time)
+      .eq("room", course.room || "");
+    if (findError) throw findError;
+    const matchedRow = (existingRows || []).find((row) => courseIdentityKey({
+      name: row.name,
+      teacher: row.teacher,
+      kind: row.kind,
+      weekdays: row.weekdays,
+      time: row.time,
+      room: row.room,
+      archived: row.archived,
+    }) === courseIdentityKey(course));
+    if (matchedRow?.id) {
+      payload = { ...payload, id: matchedRow.id };
+    }
+  }
+
+  const { data: courseRow, error: courseError } = await supabase
+    .from("courses")
+    .upsert(payload)
+    .select("*")
+    .single();
+  if (courseError) throw courseError;
+
+  const { error: weeklyError } = await supabase
+    .from("course_weekly_records")
+    .upsert(buildCourseWeeklyRows(courseRow.id, course.weeklyRecords), { onConflict: "course_id,week_number" });
+  if (weeklyError) throw weeklyError;
+
+  const { data: weeklyRows, error: fetchWeeklyError } = await supabase
+    .from("course_weekly_records")
+    .select("*")
+    .eq("course_id", courseRow.id);
+  if (fetchWeeklyError) throw fetchWeeklyError;
+
+  return hydrateCourseFromRemote(courseRow, weeklyRows || [], course.files || []);
+}
+
+async function saveReviewToSupabaseRecord(item) {
+  if (!supabase) return item;
+  let payload = buildReviewRowPayload(item);
+
+  if (!isUuid(item.id)) {
+    const { data: existingRows, error: findError } = await supabase
+      .from("reviews")
+      .select("*")
+      .eq("name", item.name || "")
+      .eq("subject", item.subject || "")
+      .eq("time", payload.time)
+      .eq("room", item.room || "");
+    if (findError) throw findError;
+    const matchedRow = (existingRows || []).find((row) => reviewIdentityKey({
+      name: row.name,
+      subject: row.subject,
+      sourceCourseId: row.source_course_id || "",
+      weekdays: row.weekdays,
+      time: row.time,
+      room: row.room,
+      archived: row.archived,
+    }) === reviewIdentityKey(item));
+    if (matchedRow?.id) {
+      payload = { ...payload, id: matchedRow.id };
+    }
+  }
+
+  const { data: reviewRow, error: reviewError } = await supabase
+    .from("reviews")
+    .upsert(payload)
+    .select("*")
+    .single();
+  if (reviewError) throw reviewError;
+
+  const { error: weeklyError } = await supabase
+    .from("review_weekly_records")
+    .upsert(buildReviewWeeklyRows(reviewRow.id, item.weeklyRecords), { onConflict: "review_id,week_number" });
+  if (weeklyError) throw weeklyError;
+
+  const { data: weeklyRows, error: fetchWeeklyError } = await supabase
+    .from("review_weekly_records")
+    .select("*")
+    .eq("review_id", reviewRow.id);
+  if (fetchWeeklyError) throw fetchWeeklyError;
+
+  return hydrateReviewFromRemote(reviewRow, weeklyRows || [], item.files || []);
+}
+
+function MotionButton({ className = "", children, ...props }) {
+  return (
+    <motion.button
+      whileHover={{ scale: 1.02 }}
+      whileTap={{ scale: 0.97 }}
+      transition={{ duration: 0.14 }}
+      className={className}
+      {...props}
+    >
+      {children}
+    </motion.button>
+  );
+}
+
+function Modal({ open, title, onClose, children }) {
+  return (
+    <AnimatePresence>
+      {open ? (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={onClose}
+        >
+          <motion.div
+            initial={{ y: 12, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 12, opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="w-full max-w-2xl rounded-3xl bg-white p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-5 flex items-center justify-between gap-3">
+              <h2 className="text-xl font-semibold text-zinc-900">{title}</h2>
+              <MotionButton
+                onClick={onClose}
+                className="rounded-full p-2 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900"
+              >
+                <X className="h-5 w-5" />
+              </MotionButton>
+            </div>
+            {children}
+          </motion.div>
+        </motion.div>
+      ) : null}
+    </AnimatePresence>
+  );
+}
+
+function ProgressBar({ value }) {
+  return (
+    <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200">
+      <div className="h-full rounded-full bg-zinc-900 transition-all duration-300" style={{ width: `${value}%` }} />
+    </div>
+  );
+}
+
+function StatCard({ icon, label, value, helper }) {
+  return (
+    <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+      <div className="mb-3 flex items-center gap-3 text-zinc-500">
+        <div className="rounded-2xl bg-zinc-100 p-2">{icon}</div>
+        <span className="text-sm font-medium">{label}</span>
+      </div>
+      <div className="text-2xl font-semibold text-zinc-900">{value}</div>
+      <div className="mt-1 text-sm text-zinc-500">{helper}</div>
+    </div>
+  );
+}
+
+function SectionCard({ title, subtitle, right, children, stickyHeader = false }) {
+  return (
+    <section className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+      <div
+        className={classNames(
+          "mb-4 flex flex-wrap items-start justify-between gap-3",
+          stickyHeader ? "sticky top-28 z-30 rounded-2xl bg-white/95 p-3 shadow-sm ring-1 ring-zinc-200 backdrop-blur" : ""
+        )}
+      >
+        <div>
+          <h3 className="text-lg font-semibold text-zinc-900">{title}</h3>
+          {subtitle ? <p className="mt-1 text-sm text-zinc-500">{subtitle}</p> : null}
+        </div>
+        {right}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function EmptyState({ title, description, action }) {
+  return (
+    <div className="rounded-3xl border border-dashed border-zinc-300 bg-zinc-50 p-8 text-center">
+      <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-white shadow-sm">
+        <FolderOpen className="h-6 w-6 text-zinc-500" />
+      </div>
+      <h3 className="text-lg font-semibold text-zinc-900">{title}</h3>
+      <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-zinc-500">{description}</p>
+      {action ? <div className="mt-5">{action}</div> : null}
+    </div>
+  );
+}
+
+function NavTab({ active, icon, label, onClick }) {
+  return (
+    <MotionButton
+      onClick={onClick}
+      className={classNames(
+        "inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition",
+        active ? "bg-zinc-900 text-white" : "bg-white text-zinc-700 ring-1 ring-zinc-200 hover:bg-zinc-50"
+      )}
+    >
+      {icon}
+      {label}
+    </MotionButton>
+  );
+}
+
+function StatusPill({ done, doneLabel, todoLabel, onClick }) {
+  return (
+    <MotionButton
+      onClick={onClick}
+      className={classNames(
+        "inline-flex items-center justify-center rounded-2xl px-3 py-2 text-sm font-medium transition",
+        done ? "bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200" : "bg-rose-100 text-rose-700 ring-1 ring-rose-200"
+      )}
+    >
+      {done ? doneLabel : todoLabel}
+    </MotionButton>
+  );
+}
+
+function CourseCard({ course, currentWeekNumber, selected, onOpen, onEdit, onDelete, onArchive, onToggleArchiveMark, selectionMode, checked, onToggleSelect }) {
+  const currentRecord = findWeeklyRecord(course, currentWeekNumber);
+  const progress = calcCourseProgress(course);
+  const scheduleLabel = getEntityScheduleLabel(course);
+  const autoArchiveMarked = progress === 100;
+  const archiveMarked = Boolean(course.archiveMarked) || autoArchiveMarked;
+  return (
+    <div className={classNames("rounded-3xl border bg-white p-4 shadow-sm transition", selected ? "border-zinc-900" : "border-zinc-200") }>
+      <div className="flex items-start justify-between gap-3">
+        <button onClick={onOpen} className="min-w-0 flex-1 text-left">
+          <div className="truncate text-xl font-semibold text-zinc-900">{course.name}</div>
+          <div className="mt-1 text-sm text-zinc-500">{scheduleLabel || "时间待定"}</div>
+          <div className="mt-1 text-xs text-zinc-500">{course.kind}{course.room ? ` · ${course.room}` : ""}</div>
+        </button>
+        <div className="flex items-center gap-2">
+          {selectionMode ? (
+            <MotionButton
+              onClick={onToggleSelect}
+              className={classNames(
+                "inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium",
+                checked ? "border border-zinc-900 bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+              )}
+            >
+              <CheckCircle2 className="h-4 w-4" />
+              {checked ? "已选中" : "选择"}
+            </MotionButton>
+          ) : null}
+          <MotionButton
+            onClick={onOpen}
+            className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+          >
+            <Eye className="h-4 w-4" />
+            查看
+          </MotionButton>
+          <MotionButton
+            onClick={onEdit}
+            className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+          >
+            <Pencil className="h-4 w-4" />
+            编辑
+          </MotionButton>
+          <MotionButton
+            onClick={onToggleArchiveMark}
+            disabled={autoArchiveMarked}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium",
+              archiveMarked
+                ? "border border-amber-200 bg-amber-50 text-amber-800"
+                : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
+              autoArchiveMarked ? "cursor-not-allowed opacity-70" : ""
+            )}
+          >
+            <CheckCircle2 className="h-4 w-4" />
+            {autoArchiveMarked ? "已自动标记" : archiveMarked ? "取消归档标记" : "标记归档"}
+          </MotionButton>
+          <MotionButton
+            onClick={onArchive}
+            className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+          >
+            <Archive className="h-4 w-4" />
+            归档
+          </MotionButton>
+          <MotionButton
+            onClick={onDelete}
+            className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
+          >
+            <Trash2 className="h-4 w-4" />
+            删除
+          </MotionButton>
+        </div>
+      </div>
+      <div className="mt-4">
+        <div className="mb-1 flex items-center justify-between text-xs text-zinc-500">
+          <span>本学期进度</span>
+          <span>{progress}%</span>
+        </div>
+        <ProgressBar value={progress} />
+      </div>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        {archiveMarked ? (
+          <span className="rounded-full bg-amber-100 px-3 py-2 text-xs font-medium text-amber-800">
+            {autoArchiveMarked ? "进度 100%，已自动标记归档" : "已标记归档"}
+          </span>
+        ) : null}
+        <span className={classNames("rounded-full px-3 py-2 text-xs font-medium", currentRecord?.lectureDone ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700")}>
+          {currentRecord?.lectureDone ? "本周已上课" : "本周未上课"}
+        </span>
+        <span className={classNames("rounded-full px-3 py-2 text-xs font-medium", currentRecord?.homeworkDone ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700")}>
+          {currentRecord?.homeworkDone ? "本周已写作业" : "本周未写作业"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function StickyActionToolbar({ children }) {
+  return (
+    <div className="-mx-1 rounded-2xl bg-white/95 p-1">
+      <div className="flex flex-wrap items-center gap-2">{children}</div>
+    </div>
+  );
+}
+
+function ReviewCard({ item, selected, onOpen, onDelete, onToggleArchiveMark, selectionMode, checked, onToggleSelect }) {
+  const progress = calcReviewProgress(item);
+  const scheduleLabel = getEntityScheduleLabel(item);
+  const autoArchiveMarked = progress === 100;
+  const archiveMarked = Boolean(item.archiveMarked) || autoArchiveMarked;
+  return (
+    <div className={classNames("rounded-3xl border bg-white p-4 shadow-sm transition", selected ? "border-zinc-900" : "border-zinc-200")}>
+      <div className="flex items-start justify-between gap-3">
+        <button onClick={onOpen} className="min-w-0 flex-1 text-left">
+          <div className="truncate text-xl font-semibold text-zinc-900">{item.name}</div>
+          <div className="mt-1 text-sm text-zinc-500">{scheduleLabel || "时间待定"}</div>
+          <div className="mt-1 text-xs text-zinc-500">
+            {item.subject || "未分类"}
+            {item.room ? ` · ${item.room}` : ""}
+          </div>
+        </button>
+        <div className="flex items-center gap-2">
+          {selectionMode ? (
+            <MotionButton
+              onClick={onToggleSelect}
+              className={classNames(
+                "inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium",
+                checked ? "border border-zinc-900 bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+              )}
+            >
+              <CheckCircle2 className="h-4 w-4" />
+              {checked ? "已选中" : "选择"}
+            </MotionButton>
+          ) : null}
+          <MotionButton
+            onClick={onOpen}
+            className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+          >
+            <Eye className="h-4 w-4" />
+            查看
+          </MotionButton>
+          <MotionButton
+            onClick={onToggleArchiveMark}
+            disabled={autoArchiveMarked}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium",
+              archiveMarked
+                ? "border border-amber-200 bg-amber-50 text-amber-800"
+                : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
+              autoArchiveMarked ? "cursor-not-allowed opacity-70" : ""
+            )}
+          >
+            <CheckCircle2 className="h-4 w-4" />
+            {autoArchiveMarked ? "已自动标记" : archiveMarked ? "取消归档标记" : "标记归档"}
+          </MotionButton>
+          <MotionButton
+            onClick={onDelete}
+            className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
+          >
+            <Trash2 className="h-4 w-4" />
+            删除
+          </MotionButton>
+        </div>
+      </div>
+      <div className="mt-4">
+        <div className="mb-1 flex items-center justify-between text-xs text-zinc-500">
+          <span>复习进度</span>
+          <span>{progress}%</span>
+        </div>
+        <ProgressBar value={progress} />
+      </div>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        {archiveMarked ? (
+          <span className="rounded-full bg-amber-100 px-3 py-2 text-xs font-medium text-amber-800">
+            {autoArchiveMarked ? "进度 100%，已自动标记归档" : "已标记归档"}
+          </span>
+        ) : null}
+        <span className={classNames("rounded-full px-3 py-2 text-xs font-medium", progress === 100 ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700")}>
+          {progress === 100 ? "已复习完成" : "未复习完成"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function FileSection({ title, files, busyFileId, onOpen, onDownload, onDelete }) {
+  return (
+    <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h4 className="text-base font-semibold text-zinc-900">{title}</h4>
+        <span className="rounded-full bg-white px-3 py-1 text-xs text-zinc-500">{files.length} 个文件</span>
+      </div>
+      {files.length ? (
+        <div className="space-y-3">
+          {files.map((file) => (
+            <div key={file.id} className="rounded-2xl border border-zinc-200 bg-white p-4">
+              <div className="text-sm font-medium text-zinc-900">{file.name}</div>
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-zinc-500">
+                <span>{formatBytes(file.size)}</span>
+                <span>{file.mime || "未知文件类型"}</span>
+                <span>{formatDateTime(file.uploadedAt)}</span>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <MotionButton
+                  onClick={() => onOpen(file)}
+                  disabled={busyFileId === file.id}
+                  className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+                >
+                  打开
+                </MotionButton>
+                <MotionButton
+                  onClick={() => onDownload(file)}
+                  disabled={busyFileId === file.id}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+                >
+                  <Download className="h-4 w-4" />
+                  下载
+                </MotionButton>
+                <MotionButton
+                  onClick={() => onDelete(file.id)}
+                  className="rounded-2xl border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
+                >
+                  删除
+                </MotionButton>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="text-sm text-zinc-500">这个分类下还没有文件。</div>
+      )}
+    </div>
+  );
+}
+
+function ReviewFileSection({ title, files, busyFileId, onOpen, onDownload, onToggleReview }) {
+  return (
+    <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h4 className="text-base font-semibold text-zinc-900">{title}</h4>
+        <span className="rounded-full bg-white px-3 py-1 text-xs text-zinc-500">{files.length} 个文件</span>
+      </div>
+      {files.length ? (
+        <div className="space-y-3">
+          {files.map((file) => (
+            <div key={file.id} className="rounded-2xl border border-zinc-200 bg-white p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-zinc-900">{file.name}</div>
+                  <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-zinc-500">
+                    <span>{formatBytes(file.size)}</span>
+                    <span>{file.mime || "未知文件类型"}</span>
+                    <span>{formatDateTime(file.uploadedAt)}</span>
+                  </div>
+                </div>
+                <span className={classNames("rounded-full px-3 py-2 text-xs font-medium", file.reviewed ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700")}>
+                  {file.reviewed ? "已复习" : "未复习"}
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <MotionButton
+                  onClick={() => onOpen(file)}
+                  disabled={busyFileId === file.id}
+                  className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+                >
+                  打开
+                </MotionButton>
+                <MotionButton
+                  onClick={() => onDownload(file)}
+                  disabled={busyFileId === file.id}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+                >
+                  <Download className="h-4 w-4" />
+                  下载
+                </MotionButton>
+                <MotionButton
+                  onClick={() => onToggleReview(file.id)}
+                  className={classNames(
+                    "rounded-2xl px-3 py-2 text-sm font-medium",
+                    file.reviewed ? "border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                  )}
+                >
+                  {file.reviewed ? "标记未复习" : "标记已复习"}
+                </MotionButton>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="text-sm text-zinc-500">这个分类下还没有文件。</div>
+      )}
+    </div>
+  );
+}
+
+function StatusActionBar({ hasUnsavedStatusChanges, changedCount, onDiscard, onSave, sticky = false }) {
+  return (
+    <div
+      className={classNames(
+        "flex flex-wrap items-center gap-2",
+        sticky ? "sticky top-28 z-30 rounded-2xl border border-amber-200 bg-white/95 p-2 shadow-sm backdrop-blur" : ""
+      )}
+    >
+      {hasUnsavedStatusChanges ? <span className="rounded-full bg-amber-100 px-3 py-2 text-xs font-medium text-amber-700">已改 {changedCount} 项</span> : null}
+      <MotionButton
+        onClick={onDiscard}
+        disabled={!hasUnsavedStatusChanges}
+        className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        放弃修改
+      </MotionButton>
+      <MotionButton
+        onClick={onSave}
+        disabled={!hasUnsavedStatusChanges}
+        className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+      >
+        保存状态
+      </MotionButton>
+    </div>
+  );
+}
+
+export default function SemesterStudyHub() {
+  const [courses, setCourses] = useState([]);
+  const [reviews, setReviews] = useState([]);
+  const [selectedCourseId, setSelectedCourseId] = useState(null);
+  const [selectedReviewId, setSelectedReviewId] = useState(null);
+  const [query, setQuery] = useState("");
+  const [reviewQuery, setReviewQuery] = useState("");
+  const [archiveQuery, setArchiveQuery] = useState("");
+  const [reviewArchiveQuery, setReviewArchiveQuery] = useState("");
+  const [courseSelectionMode, setCourseSelectionMode] = useState(false);
+  const [reviewSelectionMode, setReviewSelectionMode] = useState(false);
+  const [selectedCourseIdsForBatchDelete, setSelectedCourseIdsForBatchDelete] = useState([]);
+  const [selectedReviewIdsForBatchDelete, setSelectedReviewIdsForBatchDelete] = useState([]);
+  const [page, setPage] = useState("overview");
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [editingCourseId, setEditingCourseId] = useState(null);
+  const [editingReviewId, setEditingReviewId] = useState(null);
+  const [confirmState, setConfirmState] = useState(null);
+  const [unsavedPromptState, setUnsavedPromptState] = useState(null);
+  const [toastMessage, setToastMessage] = useState("");
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
+  const [isMigratingLegacyFiles, setIsMigratingLegacyFiles] = useState(false);
+  const [statusDrafts, setStatusDrafts] = useState({});
+  const [reviewStatusDrafts, setReviewStatusDrafts] = useState({});
+  const [weekdayFilter, setWeekdayFilter] = useState("全部星期");
+  const [archiveWeekdayFilter, setArchiveWeekdayFilter] = useState("全部星期");
+  const [unfinishedOnly, setUnfinishedOnly] = useState(false);
+  const [hasFilesOnly, setHasFilesOnly] = useState(false);
+  const [reviewWeekdayFilter, setReviewWeekdayFilter] = useState("全部星期");
+  const [reviewUnfinishedOnly, setReviewUnfinishedOnly] = useState(false);
+  const [reviewHasFilesOnly, setReviewHasFilesOnly] = useState(false);
+  const [uploadCategory, setUploadCategory] = useState("笔记");
+  const [uploading, setUploading] = useState(false);
+  const [isFileDragActive, setIsFileDragActive] = useState(false);
+  const [reviewUploadCategory, setReviewUploadCategory] = useState("笔记");
+  const [reviewUploading, setReviewUploading] = useState(false);
+  const [isReviewFileDragActive, setIsReviewFileDragActive] = useState(false);
+  const [busyFileId, setBusyFileId] = useState(null);
+  const [reviewBusyFileId, setReviewBusyFileId] = useState(null);
+  const [createForm, setCreateForm] = useState(EMPTY_COURSE_FORM);
+  const [reviewForm, setReviewForm] = useState(EMPTY_REVIEW_FORM);
+  const [courseFormErrors, setCourseFormErrors] = useState({});
+  const [reviewFormErrors, setReviewFormErrors] = useState({});
+  const [isSavingCourse, setIsSavingCourse] = useState(false);
+  const [isSavingReview, setIsSavingReview] = useState(false);
+  const [currentDateTick, setCurrentDateTick] = useState(() => Date.now());
+  const fileInputRef = useRef(null);
+  const fileDragDepthRef = useRef(0);
+  const reviewFileInputRef = useRef(null);
+  const reviewFileDragDepthRef = useRef(0);
+  const bootstrapStartedRef = useRef(false);
+  const legacyFileMigrationStartedRef = useRef(false);
+  const currentWeekNumber = useMemo(() => getCurrentWeekNumber(new Date(currentDateTick)), [currentDateTick]);
+  const currentWeekLabel = TERM_WEEKS[currentWeekNumber - 1]?.label || "";
+
+  useEffect(() => {
+    if (bootstrapStartedRef.current) return undefined;
+    bootstrapStartedRef.current = true;
+
+    async function saveCourseToSupabase(course) {
+      const { data: courseRow, error: courseError } = await supabase
+        .from("courses")
+        .upsert(buildCourseRowPayload(course))
+        .select("*")
+        .single();
+      if (courseError) throw courseError;
+
+      const { error: weeklyError } = await supabase
+        .from("course_weekly_records")
+        .upsert(buildCourseWeeklyRows(courseRow.id, course.weeklyRecords), { onConflict: "course_id,week_number" });
+      if (weeklyError) throw weeklyError;
+
+      const { data: weeklyRows, error: fetchWeeklyError } = await supabase
+        .from("course_weekly_records")
+        .select("*")
+        .eq("course_id", courseRow.id);
+      if (fetchWeeklyError) throw fetchWeeklyError;
+
+      return hydrateCourseFromRemote(courseRow, weeklyRows || [], course.files || []);
+    }
+
+    async function saveReviewToSupabase(item) {
+      const { data: reviewRow, error: reviewError } = await supabase
+        .from("reviews")
+        .upsert(buildReviewRowPayload(item))
+        .select("*")
+        .single();
+      if (reviewError) throw reviewError;
+
+      const { error: weeklyError } = await supabase
+        .from("review_weekly_records")
+        .upsert(buildReviewWeeklyRows(reviewRow.id, item.weeklyRecords), { onConflict: "review_id,week_number" });
+      if (weeklyError) throw weeklyError;
+
+      const { data: weeklyRows, error: fetchWeeklyError } = await supabase
+        .from("review_weekly_records")
+        .select("*")
+        .eq("review_id", reviewRow.id);
+      if (fetchWeeklyError) throw fetchWeeklyError;
+
+      return hydrateReviewFromRemote(reviewRow, weeklyRows || [], item.files || []);
+    }
+
+    async function fetchRemoteDataset(localCourses, localReviews) {
+      const localCourseFilesMap = buildEntityFilesMap(localCourses);
+      const localReviewFilesMap = buildEntityFilesMap(localReviews);
+
+      const { data: courseRows, error: coursesError } = await supabase.from("courses").select("*").order("created_at", { ascending: true });
+      if (coursesError) throw coursesError;
+
+      const { data: reviewRows, error: reviewsError } = await supabase.from("reviews").select("*").order("created_at", { ascending: true });
+      if (reviewsError) throw reviewsError;
+
+      const courseIds = (courseRows || []).map((course) => course.id);
+      const reviewIds = (reviewRows || []).map((item) => item.id);
+
+      const { data: courseWeeklyRows, error: courseWeeklyError } = courseIds.length
+        ? await supabase.from("course_weekly_records").select("*").in("course_id", courseIds)
+        : { data: [], error: null };
+      if (courseWeeklyError) throw courseWeeklyError;
+
+      const { data: reviewWeeklyRows, error: reviewWeeklyError } = reviewIds.length
+        ? await supabase.from("review_weekly_records").select("*").in("review_id", reviewIds)
+        : { data: [], error: null };
+      if (reviewWeeklyError) throw reviewWeeklyError;
+
+      const { data: courseFileRows, error: courseFilesError } = courseIds.length
+        ? await supabase.from("course_files").select("*").in("course_id", courseIds)
+        : { data: [], error: null };
+      if (courseFilesError) throw courseFilesError;
+
+      const { data: reviewFileRows, error: reviewFilesError } = reviewIds.length
+        ? await supabase.from("review_files").select("*").in("review_id", reviewIds)
+        : { data: [], error: null };
+      if (reviewFilesError) throw reviewFilesError;
+
+      return {
+        courses: dedupeCourses((courseRows || []).map((courseRow) =>
+          hydrateCourseFromRemote(
+            courseRow,
+            (courseWeeklyRows || []).filter((record) => record.course_id === courseRow.id),
+            mergeFileLists(
+              (courseFileRows || []).filter((row) => row.course_id === courseRow.id).map(buildCourseFileMetaFromRow),
+              localCourseFilesMap[courseRow.id] || []
+            )
+          )
+        )),
+        reviews: dedupeReviews((reviewRows || []).map((reviewRow) =>
+          hydrateReviewFromRemote(
+            reviewRow,
+            (reviewWeeklyRows || []).filter((record) => record.review_id === reviewRow.id),
+            mergeFileLists(
+              (reviewFileRows || []).filter((row) => row.review_id === reviewRow.id).map(buildReviewFileMetaFromRow),
+              localReviewFilesMap[reviewRow.id] || []
+            )
+          )
+        )),
+      };
+    }
+
+    async function migrateLocalDataToSupabase(localCourses, localReviews, existingCourseIdMap = new Map()) {
+      const migratedCourses = [];
+      const courseIdMap = new Map(existingCourseIdMap);
+
+      for (const course of localCourses) {
+        const savedCourse = await saveCourseToSupabase({ ...course, id: undefined });
+        migratedCourses.push(savedCourse);
+        courseIdMap.set(course.id, savedCourse.id);
+      }
+
+      const migratedReviews = [];
+      for (const item of localReviews) {
+        const savedReview = await saveReviewToSupabase({
+          ...item,
+          id: undefined,
+          sourceCourseId: courseIdMap.get(item.sourceCourseId) || "",
+        });
+        migratedReviews.push(savedReview);
+      }
+
+      return { courses: migratedCourses, reviews: migratedReviews };
+    }
+
+    async function bootstrapData() {
+      const localCourses = readLocalCoursesFromStorage();
+      const localReviews = readLocalReviewsFromStorage();
+
+      if (!isSupabaseConfigured || !supabase) {
+        if (!cancelled) {
+          setCourses(localCourses.length ? localCourses : STARTER_COURSES.map((course) => makeCourse(course)));
+          setReviews(localReviews);
+          setIsBootstrapping(false);
+        }
+        return;
+      }
+
+      try {
+        const remoteData = await withTimeout(
+          fetchRemoteDataset(localCourses, localReviews),
+          8000,
+          "云端数据加载超时"
+        );
+
+        const courseIdentityMap = new Map(
+          remoteData.courses.map((course) => [courseIdentityKey(course), course])
+        );
+        const existingCourseIdMap = new Map();
+        localCourses.forEach((course) => {
+          const matchedRemoteCourse = courseIdentityMap.get(courseIdentityKey(course));
+          if (matchedRemoteCourse) {
+            existingCourseIdMap.set(course.id, matchedRemoteCourse.id);
+          }
+        });
+
+        const localOnlyCourses = localCourses.filter((course) => !courseIdentityMap.has(courseIdentityKey(course)));
+
+        const remoteReviewIdentitySet = new Set(
+          remoteData.reviews.map((item) => reviewIdentityKey(item))
+        );
+        const localOnlyReviews = localReviews.filter((item) => {
+          const resolvedSourceCourseId = existingCourseIdMap.get(item.sourceCourseId) || item.sourceCourseId || "";
+          return !remoteReviewIdentitySet.has(reviewIdentityKey({ ...item, sourceCourseId: resolvedSourceCourseId }));
+        });
+
+        if (localOnlyCourses.length || localOnlyReviews.length) {
+          const migratedData = await withTimeout(
+            migrateLocalDataToSupabase(localOnlyCourses, localOnlyReviews, existingCourseIdMap),
+            12000,
+            "补充同步本地数据到云端超时"
+          );
+          const mergedCourses = dedupeCourses([...remoteData.courses, ...migratedData.courses]);
+          const mergedReviews = dedupeReviews([...remoteData.reviews, ...migratedData.reviews]);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(mergedCourses));
+          localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(mergedReviews));
+          setCourses(mergedCourses);
+          setReviews(mergedReviews);
+          setToastMessage("已补充同步本地新增课程与复习到云端。");
+          setIsBootstrapping(false);
+          return;
+        }
+
+        if (remoteData.courses.length || remoteData.reviews.length) {
+          setCourses(remoteData.courses);
+          setReviews(remoteData.reviews);
+          setIsBootstrapping(false);
+          return;
+        }
+
+        if (localCourses.length || localReviews.length) {
+          const migratedData = await withTimeout(
+            migrateLocalDataToSupabase(localCourses, localReviews),
+            12000,
+            "本地数据迁移到云端超时"
+          );
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(migratedData.courses));
+          localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(migratedData.reviews));
+          setCourses(migratedData.courses);
+          setReviews(migratedData.reviews);
+          setToastMessage("已把本地课程与复习数据迁移到云端。");
+          setIsBootstrapping(false);
+          return;
+        }
+
+        const starterCourses = [];
+        for (const starter of STARTER_COURSES.map((course) => makeCourse(course))) {
+          starterCourses.push(
+            await withTimeout(
+              saveCourseToSupabase({ ...starter, id: undefined }),
+              8000,
+              "初始化云端课程超时"
+            )
+          );
+        }
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(starterCourses));
+        localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify([]));
+        setCourses(starterCourses);
+        setReviews([]);
+        setToastMessage("已初始化云端课程数据。");
+        setIsBootstrapping(false);
+      } catch (error) {
+        console.error("Failed to bootstrap Supabase data.", error);
+        setCourses(localCourses.length ? localCourses : STARTER_COURSES.map((course) => makeCourse(course)));
+        setReviews(localReviews);
+        setToastMessage(`云端数据读取失败，已临时回退到本地数据。${error?.message ? `（${error.message}）` : ""}`);
+        setIsBootstrapping(false);
+      }
+    }
+
+    bootstrapData();
+    return undefined;
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(courses));
+  }, [courses]);
+
+  useEffect(() => {
+    localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(reviews));
+  }, [reviews]);
+
+  useEffect(() => {
+    if (legacyFileMigrationStartedRef.current || isBootstrapping) return undefined;
+    legacyFileMigrationStartedRef.current = true;
+
+    async function migrateLegacyFilesToSupabase() {
+      if (!isSupabaseConfigured || !supabase || isBootstrapping || isMigratingLegacyFiles) return;
+
+      const hasLegacyCourseFiles = courses.some((course) => (course.files || []).some((file) => !file.storagePath));
+      const hasLegacyReviewFiles = reviews.some((item) => (item.files || []).some((file) => !file.storagePath));
+      if (!hasLegacyCourseFiles && !hasLegacyReviewFiles) return;
+
+      setIsMigratingLegacyFiles(true);
+      try {
+        const courseFileIdMap = new Map();
+        const nextCourses = [];
+
+        for (const course of courses) {
+          const nextFiles = [];
+          for (const file of course.files || []) {
+            if (file.storagePath) {
+              nextFiles.push(file);
+              continue;
+            }
+
+            const record = await getFileRecord(file.id).catch(() => null);
+            if (!record?.blob) {
+              nextFiles.push(file);
+              continue;
+            }
+
+            const nextId = crypto.randomUUID();
+            const storagePath = `courses/${course.id}/${nextId}-${sanitizeFileName(file.name)}`;
+            const blob = new Blob([record.blob], { type: file.mime || record.mime || "application/octet-stream" });
+            const { error: uploadError } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, blob, {
+              upsert: true,
+              contentType: file.mime || record.mime || "application/octet-stream",
+            });
+            if (uploadError) throw uploadError;
+
+            const { error: insertError } = await supabase.from("course_files").insert({
+              id: nextId,
+              course_id: course.id,
+              name: file.name,
+              mime: file.mime || record.mime || "",
+              size: file.size || record.size || 0,
+              category: file.category,
+              storage_path: storagePath,
+              uploaded_at: file.uploadedAt || record.uploadedAt || new Date().toISOString(),
+            });
+            if (insertError) throw insertError;
+
+            courseFileIdMap.set(file.id, nextId);
+            nextFiles.push({
+              ...file,
+              id: nextId,
+              storagePath,
+            });
+          }
+          nextCourses.push({ ...course, files: nextFiles });
+        }
+
+        const nextReviews = [];
+        for (const item of reviews) {
+          const nextFiles = [];
+          for (const file of item.files || []) {
+            if (file.storagePath) {
+              nextFiles.push({
+                ...file,
+                sourceFileId: courseFileIdMap.get(file.sourceFileId) || file.sourceFileId || null,
+              });
+              continue;
+            }
+
+            const record = await getFileRecord(file.id).catch(() => null);
+            if (!record?.blob) {
+              nextFiles.push({
+                ...file,
+                sourceFileId: courseFileIdMap.get(file.sourceFileId) || file.sourceFileId || null,
+              });
+              continue;
+            }
+
+            const nextId = crypto.randomUUID();
+            const storagePath = `reviews/${item.id}/${nextId}-${sanitizeFileName(file.name)}`;
+            const blob = new Blob([record.blob], { type: file.mime || record.mime || "application/octet-stream" });
+            const { error: uploadError } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, blob, {
+              upsert: true,
+              contentType: file.mime || record.mime || "application/octet-stream",
+            });
+            if (uploadError) throw uploadError;
+
+            const remappedSourceFileId = courseFileIdMap.get(file.sourceFileId) || (isUuid(file.sourceFileId) ? file.sourceFileId : null);
+            const { error: insertError } = await supabase.from("review_files").insert({
+              id: nextId,
+              review_id: item.id,
+              source_file_id: remappedSourceFileId,
+              name: file.name,
+              mime: file.mime || record.mime || "",
+              size: file.size || record.size || 0,
+              category: file.category,
+              storage_path: storagePath,
+              reviewed: Boolean(file.reviewed),
+              uploaded_at: file.uploadedAt || record.uploadedAt || new Date().toISOString(),
+            });
+            if (insertError) throw insertError;
+
+            nextFiles.push({
+              ...file,
+              id: nextId,
+              sourceFileId: remappedSourceFileId,
+              storagePath,
+            });
+          }
+          nextReviews.push({ ...item, files: nextFiles });
+        }
+
+        setCourses(nextCourses);
+        setReviews(nextReviews);
+        showToast("旧文件已迁移到云端。");
+      } catch (error) {
+        console.error("Failed to migrate legacy files to Supabase Storage.", error);
+        showToast("旧文件迁移到云端失败，当前仍保留本地兼容。");
+      } finally {
+        setIsMigratingLegacyFiles(false);
+      }
+    }
+
+    migrateLegacyFilesToSupabase();
+    return undefined;
+  }, [courses, reviews, isBootstrapping, isMigratingLegacyFiles]);
+
+  useEffect(() => {
+    if (!toastMessage) return undefined;
+    const timer = window.setTimeout(() => setToastMessage(""), 2400);
+    return () => window.clearTimeout(timer);
+  }, [toastMessage]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setCurrentDateTick(Date.now()), getMillisecondsUntilNextDay(new Date()));
+    return () => window.clearTimeout(timer);
+  }, [currentDateTick]);
+
+  const hasUnsavedCourseStatusChanges = useMemo(() => Object.keys(statusDrafts).length > 0, [statusDrafts]);
+  const statusDraftSummary = useMemo(() => {
+    const courseCount = Object.keys(statusDrafts).length;
+    let weekCount = 0;
+    let fieldCount = 0;
+
+    Object.values(statusDrafts).forEach((courseDraft) => {
+      weekCount += Object.keys(courseDraft).length;
+      Object.values(courseDraft).forEach((recordDraft) => {
+        fieldCount += ["lectureDone", "homeworkDone"].filter((field) => field in recordDraft).length;
+      });
+    });
+
+    return { courseCount, weekCount, fieldCount };
+  }, [statusDrafts]);
+
+  const hasUnsavedReviewStatusChanges = useMemo(() => Object.keys(reviewStatusDrafts).length > 0, [reviewStatusDrafts]);
+  const reviewStatusDraftSummary = useMemo(() => {
+    const itemCount = Object.keys(reviewStatusDrafts).length;
+    let weekCount = 0;
+    let fieldCount = 0;
+
+    Object.values(reviewStatusDrafts).forEach((reviewDraft) => {
+      weekCount += Object.keys(reviewDraft).length;
+      Object.values(reviewDraft).forEach((recordDraft) => {
+        fieldCount += ["reviewDone"].filter((field) => field in recordDraft).length;
+      });
+    });
+
+    return { itemCount, weekCount, fieldCount };
+  }, [reviewStatusDrafts]);
+
+  const hasUnsavedStatusChanges = hasUnsavedCourseStatusChanges || hasUnsavedReviewStatusChanges;
+  const allStatusDraftSummary = useMemo(
+    () => ({
+      fieldCount: statusDraftSummary.fieldCount + reviewStatusDraftSummary.fieldCount,
+      courseFieldCount: statusDraftSummary.fieldCount,
+      reviewFieldCount: reviewStatusDraftSummary.fieldCount,
+      courseCount: statusDraftSummary.courseCount,
+      reviewCount: reviewStatusDraftSummary.itemCount,
+    }),
+    [reviewStatusDraftSummary.fieldCount, reviewStatusDraftSummary.itemCount, statusDraftSummary.courseCount, statusDraftSummary.fieldCount]
+  );
+
+  useEffect(() => {
+    if (!hasUnsavedStatusChanges) return undefined;
+    const handleBeforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [hasUnsavedStatusChanges]);
+
+  useEffect(() => {
+    const activeCourses = courses.filter((course) => !course.archived);
+    if (!activeCourses.length) {
+      setSelectedCourseId(null);
+      return;
+    }
+    const exists = activeCourses.some((course) => course.id === selectedCourseId);
+    if (!exists) setSelectedCourseId(activeCourses[0].id);
+  }, [courses, selectedCourseId]);
+
+  useEffect(() => {
+    if (!reviews.length) {
+      setSelectedReviewId(null);
+      return;
+    }
+    const exists = reviews.some((item) => item.id === selectedReviewId);
+    if (!exists) setSelectedReviewId(reviews[0].id);
+  }, [reviews, selectedReviewId]);
+
+  useEffect(() => {
+    setSelectedCourseIdsForBatchDelete((prev) => prev.filter((id) => courses.some((course) => course.id === id && !course.archived)));
+  }, [courses]);
+
+  useEffect(() => {
+    setSelectedReviewIdsForBatchDelete((prev) => prev.filter((id) => reviews.some((item) => item.id === id && !item.archived)));
+  }, [reviews]);
+
+  const coursesWithStatusDrafts = useMemo(
+    () =>
+      courses.map((course) => {
+        const courseDraft = statusDrafts[course.id];
+        if (!courseDraft) return course;
+        return {
+          ...course,
+          weeklyRecords: course.weeklyRecords.map((record) => {
+            const draft = courseDraft[record.weekNumber];
+            return draft ? { ...record, ...draft } : record;
+          }),
+        };
+      }),
+    [courses, statusDrafts]
+  );
+
+  const reviewsWithStatusDrafts = useMemo(
+    () =>
+      reviews.map((item) => {
+        const reviewDraft = reviewStatusDrafts[item.id];
+        if (!reviewDraft) return item;
+        return {
+          ...item,
+          weeklyRecords: item.weeklyRecords.map((record) => {
+            const draft = reviewDraft[record.weekNumber];
+            return draft ? { ...record, ...draft } : record;
+          }),
+        };
+      }),
+    [reviewStatusDrafts, reviews]
+  );
+
+  const activeCourses = useMemo(() => coursesWithStatusDrafts.filter((course) => !course.archived).sort(courseSort), [coursesWithStatusDrafts]);
+  const archivedCourses = useMemo(() => coursesWithStatusDrafts.filter((course) => course.archived).sort(courseSort), [coursesWithStatusDrafts]);
+  const reviewItems = useMemo(() => reviewsWithStatusDrafts.slice().sort(courseSort), [reviewsWithStatusDrafts]);
+  const activeReviewItems = useMemo(() => reviewItems.filter((item) => !item.archived), [reviewItems]);
+  const archivedReviewItems = useMemo(() => reviewItems.filter((item) => item.archived), [reviewItems]);
+  const availableReviewCourses = useMemo(
+    () => activeCourses.filter((course) => !reviews.some((item) => item.sourceCourseId === course.id)),
+    [activeCourses, reviews]
+  );
+
+  const filteredCourses = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return activeCourses.filter((course) => {
+      const scheduleEntries = getEntityScheduleEntries(course);
+      const scheduleLabel = formatScheduleEntries(scheduleEntries);
+      const haystack = `${course.name} ${course.teacher} ${course.kind} ${scheduleLabel}`.toLowerCase();
+      const currentRecord = findWeeklyRecord(course, currentWeekNumber);
+      const matchesSearch = !q || haystack.includes(q);
+      const matchesWeekday = weekdayFilter === "全部星期" || getScheduleWeekdays(scheduleEntries).includes(weekdayFilter);
+      const matchesUnfinished = !unfinishedOnly || !(currentRecord?.lectureDone && currentRecord?.homeworkDone);
+      const matchesFiles = !hasFilesOnly || Boolean(course.files?.length);
+      return matchesSearch && matchesWeekday && matchesUnfinished && matchesFiles;
+    });
+  }, [activeCourses, currentWeekNumber, hasFilesOnly, query, unfinishedOnly, weekdayFilter]);
+
+  const filteredReviewItems = useMemo(() => {
+    const q = reviewQuery.trim().toLowerCase();
+    return activeReviewItems.filter((item) => {
+      const scheduleEntries = getEntityScheduleEntries(item);
+      const haystack = `${item.name} ${item.subject} ${formatScheduleEntries(scheduleEntries)} ${item.room}`.toLowerCase();
+      const progress = calcReviewProgress(item);
+      const matchesSearch = !q || haystack.includes(q);
+      const matchesWeekday = reviewWeekdayFilter === "全部星期" || getScheduleWeekdays(scheduleEntries).includes(reviewWeekdayFilter);
+      const matchesUnfinished = !reviewUnfinishedOnly || progress < 100;
+      const matchesFiles = !reviewHasFilesOnly || Boolean(item.files?.length);
+      return matchesSearch && matchesWeekday && matchesUnfinished && matchesFiles;
+    });
+  }, [activeReviewItems, reviewHasFilesOnly, reviewQuery, reviewUnfinishedOnly, reviewWeekdayFilter]);
+
+  const filteredArchivedCourses = useMemo(() => {
+    const q = archiveQuery.trim().toLowerCase();
+    return archivedCourses.filter((course) => {
+      const scheduleEntries = getEntityScheduleEntries(course);
+      const haystack = `${course.name} ${course.teacher} ${course.kind} ${formatScheduleEntries(scheduleEntries)} ${course.room}`.toLowerCase();
+      const matchesSearch = !q || haystack.includes(q);
+      const matchesWeekday = archiveWeekdayFilter === "全部星期" || getScheduleWeekdays(scheduleEntries).includes(archiveWeekdayFilter);
+      return matchesSearch && matchesWeekday;
+    });
+  }, [archiveQuery, archiveWeekdayFilter, archivedCourses]);
+
+  const filteredArchivedReviewItems = useMemo(() => {
+    const q = reviewArchiveQuery.trim().toLowerCase();
+    return archivedReviewItems.filter((item) => {
+      const haystack = `${item.name} ${item.subject} ${getEntityScheduleLabel(item)} ${item.room}`.toLowerCase();
+      const matchesSearch = !q || haystack.includes(q);
+      return matchesSearch;
+    });
+  }, [archivedReviewItems, reviewArchiveQuery]);
+
+  const selectedCourse = useMemo(() => activeCourses.find((course) => course.id === selectedCourseId) || null, [activeCourses, selectedCourseId]);
+  const selectedReview = useMemo(() => reviewItems.find((item) => item.id === selectedReviewId) || null, [reviewItems, selectedReviewId]);
+  const selectedCourseCurrentRecord = useMemo(
+    () => (selectedCourse ? findWeeklyRecord(selectedCourse, currentWeekNumber) : null),
+    [currentWeekNumber, selectedCourse]
+  );
+  const selectedCourseFiles = useMemo(() => groupFiles(selectedCourse?.files || []), [selectedCourse]);
+  const selectedReviewFiles = useMemo(() => groupFiles(selectedReview?.files || []), [selectedReview]);
+  const selectedReviewProgress = useMemo(() => (selectedReview ? calcReviewProgress(selectedReview) : 0), [selectedReview]);
+  const selectedReviewSourceCourse = useMemo(
+    () => courses.find((course) => course.id === selectedReview?.sourceCourseId) || null,
+    [courses, selectedReview?.sourceCourseId]
+  );
+  const selectedCourseRecentFiles = useMemo(
+    () =>
+      [...(selectedCourse?.files || [])]
+        .sort((a, b) => new Date(b.uploadedAt || 0).getTime() - new Date(a.uploadedAt || 0).getTime())
+        .slice(0, 3),
+    [selectedCourse]
+  );
+  const selectedReviewRecentFiles = useMemo(
+    () =>
+      [...(selectedReview?.files || [])]
+        .sort((a, b) => new Date(b.uploadedAt || 0).getTime() - new Date(a.uploadedAt || 0).getTime())
+        .slice(0, 3),
+    [selectedReview]
+  );
+  const selectedCourseTodoItems = useMemo(() => {
+    if (!selectedCourseCurrentRecord) return [];
+    const todoItems = [];
+    if (!selectedCourseCurrentRecord.lectureDone) todoItems.push("本周上课");
+    if (!selectedCourseCurrentRecord.homeworkDone) todoItems.push("本周作业");
+    return todoItems;
+  }, [selectedCourseCurrentRecord]);
+  const selectedReviewTodoItems = useMemo(() => (selectedReviewProgress === 100 ? [] : ["复习文件"]), [selectedReviewProgress]);
+
+  const weeklyOverviewRows = useMemo(
+    () => activeCourses.map((course) => ({ ...course, currentRecord: findWeeklyRecord(course, currentWeekNumber) })),
+    [activeCourses, currentWeekNumber]
+  );
+  const reviewOverviewRows = useMemo(
+    () => activeReviewItems.map((item) => ({ ...item, progress: calcReviewProgress(item) })),
+    [activeReviewItems]
+  );
+
+  const stats = useMemo(() => {
+    const currentRecords = activeCourses.map((course) => findWeeklyRecord(course, currentWeekNumber)).filter(Boolean);
+    const filesCount = courses.reduce((sum, course) => sum + (course.files?.length || 0), 0);
+    const bothDone = currentRecords.filter((record) => record.lectureDone && record.homeworkDone).length;
+    const unfinished = activeCourses.length - bothDone;
+    return {
+      activeCount: activeCourses.length,
+      archivedCount: archivedCourses.length,
+      filesCount,
+      bothDone,
+      unfinished,
+    };
+  }, [activeCourses, archivedCourses.length, courses, currentWeekNumber]);
+
+  const reviewStats = useMemo(() => {
+    const filesCount = reviews.reduce((sum, item) => sum + (item.files?.length || 0), 0);
+    const completed = activeReviewItems.filter((item) => calcReviewProgress(item) === 100).length;
+    return {
+      count: activeReviewItems.length,
+      archivedCount: archivedReviewItems.length,
+      completed,
+      pending: activeReviewItems.length - completed,
+      filesCount,
+    };
+  }, [activeReviewItems, archivedReviewItems.length, reviews]);
+  const markedCourseCount = useMemo(() => activeCourses.filter((course) => isCourseArchiveMarked(course)).length, [activeCourses]);
+  const markedReviewCount = useMemo(() => activeReviewItems.filter((item) => isReviewArchiveMarked(item)).length, [activeReviewItems]);
+
+  async function commitCourses(nextCourses, deletedCourseIds = []) {
+    setCourses(nextCourses);
+    if (!isSupabaseConfigured || !supabase) return nextCourses;
+
+    try {
+      const savedCourses = [];
+      for (const course of nextCourses) {
+        savedCourses.push(await saveCourseToSupabaseRecord(course));
+      }
+      if (deletedCourseIds.length) {
+        const remoteIds = deletedCourseIds.filter(isUuid);
+        if (remoteIds.length) {
+          const { error } = await supabase.from("courses").delete().in("id", remoteIds);
+          if (error) throw error;
+        }
+      }
+      setCourses(savedCourses);
+      return savedCourses;
+    } catch (error) {
+      console.error("Failed to sync courses to Supabase.", error);
+      setToastMessage("课程云端同步失败，当前先保留本地修改。");
+      return nextCourses;
+    }
+  }
+
+  async function commitReviews(nextReviews, deletedReviewIds = []) {
+    setReviews(nextReviews);
+    if (!isSupabaseConfigured || !supabase) return nextReviews;
+
+    try {
+      const savedReviews = [];
+      for (const item of nextReviews) {
+        savedReviews.push(await saveReviewToSupabaseRecord(item));
+      }
+      if (deletedReviewIds.length) {
+        const remoteIds = deletedReviewIds.filter(isUuid);
+        if (remoteIds.length) {
+          const { error } = await supabase.from("reviews").delete().in("id", remoteIds);
+          if (error) throw error;
+        }
+      }
+      setReviews(savedReviews);
+      return savedReviews;
+    } catch (error) {
+      console.error("Failed to sync reviews to Supabase.", error);
+      setToastMessage("复习云端同步失败，当前先保留本地修改。");
+      return nextReviews;
+    }
+  }
+
+  async function patchCourse(courseId, updater) {
+    const nextCourses = courses.map((course) => (course.id === courseId ? updater(course) : course));
+    return commitCourses(nextCourses);
+  }
+
+  async function patchReviewItem(reviewId, updater) {
+    const nextReviews = reviews.map((item) => (item.id === reviewId ? updater(item) : item));
+    return commitReviews(nextReviews);
+  }
+
+  function showToast(message) {
+    setToastMessage(message);
+  }
+
+  function discardStatusChanges() {
+    setStatusDrafts({});
+  }
+
+  function discardReviewStatusChanges() {
+    setReviewStatusDrafts({});
+  }
+
+  function discardAllStatusChanges() {
+    discardStatusChanges();
+    discardReviewStatusChanges();
+  }
+
+  async function saveStatusChanges(showMessage = true) {
+    if (!hasUnsavedCourseStatusChanges) return;
+    const nextCourses = courses.map((course) => {
+      const courseDraft = statusDrafts[course.id];
+      if (!courseDraft) return course;
+      return {
+        ...course,
+        weeklyRecords: course.weeklyRecords.map((record) => {
+          const draft = courseDraft[record.weekNumber];
+          return draft ? { ...record, ...draft } : record;
+        }),
+      };
+    });
+    await commitCourses(nextCourses);
+    setStatusDrafts({});
+    if (showMessage) showToast("课程状态已保存。");
+  }
+
+  async function saveReviewStatusChanges(showMessage = true) {
+    if (!hasUnsavedReviewStatusChanges) return;
+    const nextReviews = reviews.map((item) => {
+      const reviewDraft = reviewStatusDrafts[item.id];
+      if (!reviewDraft) return item;
+      return {
+        ...item,
+        weeklyRecords: item.weeklyRecords.map((record) => {
+          const draft = reviewDraft[record.weekNumber];
+          return draft ? { ...record, ...draft } : record;
+        }),
+      };
+    });
+    await commitReviews(nextReviews);
+    setReviewStatusDrafts({});
+    if (showMessage) showToast("复习状态已保存。");
+  }
+
+  async function saveAllStatusChanges() {
+    if (hasUnsavedCourseStatusChanges) await saveStatusChanges(false);
+    if (hasUnsavedReviewStatusChanges) await saveReviewStatusChanges(false);
+    showToast("状态修改已保存。");
+  }
+
+  function requestUnsavedStatusPrompt(action) {
+    setUnsavedPromptState({
+      title: "有未保存的状态修改",
+      description: "你修改了课程或复习状态，但还没有保存。要先保存再继续吗？",
+      onSave: async () => {
+        await saveAllStatusChanges();
+        action();
+      },
+      onDiscard: () => {
+        discardAllStatusChanges();
+        action();
+      },
+    });
+  }
+
+  function runWithStatusGuard(action) {
+    if (hasUnsavedStatusChanges) {
+      requestUnsavedStatusPrompt(action);
+      return;
+    }
+    action();
+  }
+
+  function requestConfirmation({ title, description, confirmLabel = "确认删除", onConfirm }) {
+    setConfirmState({ title, description, confirmLabel, onConfirm });
+  }
+
+  async function handleConfirmAction() {
+    if (!confirmState?.onConfirm) return;
+    const { onConfirm } = confirmState;
+    setConfirmState(null);
+    await onConfirm();
+  }
+
+  async function handleUnsavedPromptSave() {
+    if (!unsavedPromptState?.onSave) return;
+    const { onSave } = unsavedPromptState;
+    setUnsavedPromptState(null);
+    await onSave();
+  }
+
+  function handleUnsavedPromptDiscard() {
+    if (!unsavedPromptState?.onDiscard) return;
+    const { onDiscard } = unsavedPromptState;
+    setUnsavedPromptState(null);
+    onDiscard();
+  }
+
+  function resetCourseForm() {
+    setCreateForm(EMPTY_COURSE_FORM);
+    setCourseFormErrors({});
+    setEditingCourseId(null);
+  }
+
+  function resetReviewForm() {
+    setReviewForm(EMPTY_REVIEW_FORM);
+    setReviewFormErrors({});
+    setEditingReviewId(null);
+  }
+
+  function openCreateModal() {
+    runWithStatusGuard(() => {
+      resetCourseForm();
+      setShowCreateModal(true);
+    });
+  }
+
+  function closeCourseModal() {
+    setShowCreateModal(false);
+    resetCourseForm();
+  }
+
+  function openReviewModal() {
+    runWithStatusGuard(() => {
+      resetReviewForm();
+      setShowReviewModal(true);
+    });
+  }
+
+  function closeReviewModal() {
+    setShowReviewModal(false);
+    resetReviewForm();
+  }
+
+  function updateCourseForm(field, value) {
+    setCreateForm((prev) => ({ ...prev, [field]: value }));
+    setCourseFormErrors((prev) => {
+      if (!(field in prev)) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  }
+
+  function addCourseScheduleEntry() {
+    setCreateForm((prev) => ({
+      ...prev,
+      scheduleEntries: [...(prev.scheduleEntries || []), { ...EMPTY_SCHEDULE_ENTRY }],
+    }));
+    setCourseFormErrors((prev) => {
+      if (!prev.scheduleEntries) return prev;
+      const next = { ...prev };
+      delete next.scheduleEntries;
+      return next;
+    });
+  }
+
+  function updateCourseScheduleEntry(index, field, value) {
+    setCreateForm((prev) => ({
+      ...prev,
+      scheduleEntries: (prev.scheduleEntries || []).map((entry, entryIndex) =>
+        entryIndex === index
+          ? { ...entry, [field]: field === "time" ? formatTimeRangeInput(value) : value }
+          : entry
+      ),
+    }));
+    setCourseFormErrors((prev) => {
+      if (!prev.scheduleEntries) return prev;
+      const next = { ...prev };
+      delete next.scheduleEntries;
+      return next;
+    });
+  }
+
+  function removeCourseScheduleEntry(index) {
+    setCreateForm((prev) => {
+      const currentEntries = prev.scheduleEntries || [];
+      if (currentEntries.length <= 1) return prev;
+      return {
+        ...prev,
+        scheduleEntries: currentEntries.filter((_, entryIndex) => entryIndex !== index),
+      };
+    });
+  }
+
+  function updateReviewForm(field, value) {
+    setReviewForm((prev) => ({ ...prev, [field]: value }));
+    setReviewFormErrors((prev) => {
+      if (!(field in prev)) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  }
+
+  function openEditModal(course) {
+    runWithStatusGuard(() => {
+      setEditingCourseId(course.id);
+      setCreateForm({
+        name: course.name || "",
+        teacher: course.teacher || "",
+        kind: course.kind || "Vorlesung",
+        scheduleEntries: getEntityScheduleEntries(course),
+        room: course.room || "",
+      });
+      setCourseFormErrors({});
+      setShowCreateModal(true);
+    });
+  }
+
+  function openCourse(courseId) {
+    runWithStatusGuard(() => {
+      setSelectedCourseId(courseId);
+      setPage("courseDetail");
+    });
+  }
+
+  function openReviewItem(reviewId) {
+    runWithStatusGuard(() => {
+      setSelectedReviewId(reviewId);
+      setPage("reviewDetail");
+    });
+  }
+
+  function navigateToPage(nextPage) {
+    runWithStatusGuard(() => setPage(nextPage));
+  }
+
+  function toggleCourseBatchSelection(courseId) {
+    setSelectedCourseIdsForBatchDelete((prev) =>
+      prev.includes(courseId) ? prev.filter((id) => id !== courseId) : [...prev, courseId]
+    );
+  }
+
+  function toggleReviewBatchSelection(reviewId) {
+    setSelectedReviewIdsForBatchDelete((prev) =>
+      prev.includes(reviewId) ? prev.filter((id) => id !== reviewId) : [...prev, reviewId]
+    );
+  }
+
+  function toggleSelectAllCourses() {
+    setSelectedCourseIdsForBatchDelete((prev) =>
+      prev.length === filteredCourses.length ? [] : filteredCourses.map((course) => course.id)
+    );
+  }
+
+  function toggleSelectAllReviews() {
+    setSelectedReviewIdsForBatchDelete((prev) =>
+      prev.length === filteredReviewItems.length ? [] : filteredReviewItems.map((item) => item.id)
+    );
+  }
+
+  async function saveCourse() {
+    if (isSavingCourse) return;
+    const errors = validateCourseForm(createForm);
+    if (Object.keys(errors).length) {
+      setCourseFormErrors(errors);
+      return;
+    }
+    const payload = {
+      name: createForm.name.trim(),
+      teacher: createForm.teacher.trim(),
+      kind: createForm.kind,
+      scheduleEntries: normalizeScheduleEntries(createForm.scheduleEntries, createForm.weekdays, createForm.time),
+      room: createForm.room.trim(),
+    };
+
+    setIsSavingCourse(true);
+    try {
+      if (editingCourseId) {
+        await patchCourse(editingCourseId, (course) => ({ ...course, ...payload }));
+        setSelectedCourseId(editingCourseId);
+        setPage("courseDetail");
+        closeCourseModal();
+        showToast("课程信息已保存。");
+        return;
+      }
+
+      const course = makeCourse(payload);
+      const savedCourses = await commitCourses([...courses, course]);
+      const createdCourse = savedCourses[savedCourses.length - 1] || course;
+      setSelectedCourseId(createdCourse.id);
+      setPage("courses");
+      closeCourseModal();
+      showToast("课程已创建。");
+    } finally {
+      setIsSavingCourse(false);
+    }
+  }
+
+  async function buildReviewFilesFromCourse(course, reviewId) {
+    const copiedFiles = [];
+    for (const sourceFile of course.files || []) {
+      if (sourceFile.storagePath && isSupabaseConfigured && supabase) {
+        const nextId = crypto.randomUUID();
+        const uploadedAt = sourceFile.uploadedAt || new Date().toISOString();
+        const targetPath = `reviews/${reviewId}/${nextId}-${sanitizeFileName(sourceFile.name)}`;
+        const { error: copyError } = await supabase.storage.from(STORAGE_BUCKET).copy(sourceFile.storagePath, targetPath);
+        if (copyError) throw copyError;
+        const { error: insertError } = await supabase.from("review_files").insert({
+          id: nextId,
+          review_id: reviewId,
+          source_file_id: isUuid(sourceFile.id) ? sourceFile.id : null,
+          name: sourceFile.name,
+          mime: sourceFile.mime || "",
+          size: sourceFile.size || 0,
+          category: sourceFile.category,
+          storage_path: targetPath,
+          reviewed: false,
+          uploaded_at: uploadedAt,
+        });
+        if (insertError) throw insertError;
+        copiedFiles.push({
+          id: nextId,
+          sourceFileId: sourceFile.id,
+          name: sourceFile.name,
+          mime: sourceFile.mime,
+          size: sourceFile.size,
+          category: sourceFile.category,
+          uploadedAt,
+          reviewed: false,
+          storagePath: targetPath,
+        });
+        continue;
+      }
+
+      const record = await getFileRecord(sourceFile.id).catch(() => null);
+      if (!record?.blob) continue;
+      const nextId = uid();
+      const blob = new Blob([record.blob], { type: sourceFile.mime });
+      await putFileRecord({
+        id: nextId,
+        reviewId,
+        blob,
+        name: sourceFile.name,
+        mime: sourceFile.mime,
+        size: sourceFile.size,
+        uploadedAt: sourceFile.uploadedAt || new Date().toISOString(),
+      });
+      copiedFiles.push({
+        ...sourceFile,
+        id: nextId,
+        sourceFileId: sourceFile.id,
+        reviewed: false,
+      });
+    }
+    return copiedFiles;
+  }
+
+  async function saveReviewItem() {
+    if (isSavingReview) return;
+    const errors = validateReviewForm(reviewForm);
+    if (Object.keys(errors).length) {
+      setReviewFormErrors(errors);
+      return;
+    }
+
+    const sourceCourse = courses.find((course) => course.id === reviewForm.sourceCourseId);
+    if (!sourceCourse) {
+      setReviewFormErrors({ sourceCourseId: "所选课程不存在。请重新选择。" });
+      return;
+    }
+    if (reviews.some((item) => item.sourceCourseId === sourceCourse.id)) {
+      setReviewFormErrors({ sourceCourseId: "这门课程已经创建过复习条目了。" });
+      return;
+    }
+
+    const item = makeReviewItem({
+      sourceCourseId: sourceCourse.id,
+      name: sourceCourse.name,
+      subject: sourceCourse.kind,
+      scheduleEntries: getEntityScheduleEntries(sourceCourse),
+      room: sourceCourse.room,
+      notes: "",
+      files: [],
+    });
+
+    setIsSavingReview(true);
+    try {
+      const savedReviews = await commitReviews([...reviews, item]);
+      const createdReview = savedReviews[savedReviews.length - 1] || item;
+      const copiedFiles = await buildReviewFilesFromCourse(sourceCourse, createdReview.id);
+      await patchReviewItem(createdReview.id, (reviewItem) => ({ ...reviewItem, files: copiedFiles }));
+      setSelectedReviewId(createdReview.id);
+      setPage("reviews");
+      closeReviewModal();
+      showToast(`已从课程“${sourceCourse.name}”创建复习条目。`);
+    } catch (error) {
+      console.error("Failed to create review item from course files.", error);
+      window.alert("创建复习条目失败，文件未复制成功。");
+    } finally {
+      setIsSavingReview(false);
+    }
+  }
+
+  async function importStarterCourses() {
+    const existingKeys = new Set(courses.map((course) => `${course.name}-${course.kind}-${getEntityScheduleLabel(course)}`));
+    const incoming = STARTER_COURSES.filter(
+      (course) => !existingKeys.has(`${course.name}-${course.kind}-${getEntityScheduleLabel(course)}`)
+    ).map((course) => makeCourse(course));
+    if (incoming.length) {
+      await commitCourses([...courses, ...incoming]);
+    }
+    navigateToPage("courses");
+  }
+
+  async function uploadFilesToCourse(courseId, entries) {
+    let workingCourses = courses;
+    const targetIndex = courses.findIndex((course) => course.id === courseId);
+    if (targetIndex === -1) return;
+
+    if (isSupabaseConfigured && supabase && !isUuid(courses[targetIndex].id)) {
+      workingCourses = await commitCourses(courses);
+    }
+
+    const targetCourse = workingCourses[targetIndex] || workingCourses.find((course) => course.id === courseId);
+    if (!targetCourse || !entries.length || uploading) return;
+    setUploading(true);
+    try {
+      const metadata = [];
+      const linkedReviews = reviews.filter((item) => item.sourceCourseId === targetCourse.id);
+      const reviewCopiesById = {};
+      for (const entry of entries) {
+        const file = entry.file;
+        const id = isSupabaseConfigured && supabase ? crypto.randomUUID() : uid();
+        const uploadedAt = new Date().toISOString();
+        let storagePath = "";
+
+        if (isSupabaseConfigured && supabase) {
+          storagePath = `courses/${targetCourse.id}/${id}-${sanitizeFileName(file.name)}`;
+          const { error: uploadError } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, file, { upsert: true });
+          if (uploadError) throw uploadError;
+          const { error: insertError } = await supabase.from("course_files").insert({
+            id,
+            course_id: targetCourse.id,
+            name: file.name,
+            mime: file.type || "",
+            size: file.size || 0,
+            category: entry.category,
+            storage_path: storagePath,
+            uploaded_at: uploadedAt,
+          });
+          if (insertError) throw insertError;
+        } else {
+          await putFileRecord({
+            id,
+            courseId: targetCourse.id,
+            blob: file,
+            name: file.name,
+            mime: file.type,
+            size: file.size,
+            uploadedAt,
+          });
+        }
+
+        metadata.push({
+          id,
+          name: file.name,
+          mime: file.type,
+          size: file.size,
+          category: entry.category,
+          uploadedAt,
+          ...(storagePath ? { storagePath } : {}),
+        });
+
+        for (const reviewItem of linkedReviews) {
+          const reviewFileId = isSupabaseConfigured && supabase ? crypto.randomUUID() : uid();
+          let reviewStoragePath = "";
+
+          if (isSupabaseConfigured && supabase) {
+            reviewStoragePath = `reviews/${reviewItem.id}/${reviewFileId}-${sanitizeFileName(file.name)}`;
+            const { error: copyError } = await supabase.storage.from(STORAGE_BUCKET).copy(storagePath, reviewStoragePath);
+            if (copyError) throw copyError;
+            const { error: insertReviewFileError } = await supabase.from("review_files").insert({
+              id: reviewFileId,
+              review_id: reviewItem.id,
+              source_file_id: id,
+              name: file.name,
+              mime: file.type || "",
+              size: file.size || 0,
+              category: entry.category,
+              storage_path: reviewStoragePath,
+              reviewed: false,
+              uploaded_at: uploadedAt,
+            });
+            if (insertReviewFileError) throw insertReviewFileError;
+          } else {
+            await putFileRecord({
+              id: reviewFileId,
+              reviewId: reviewItem.id,
+              blob: file,
+              name: file.name,
+              mime: file.type,
+              size: file.size,
+              uploadedAt,
+            });
+          }
+
+          if (!reviewCopiesById[reviewItem.id]) reviewCopiesById[reviewItem.id] = [];
+          reviewCopiesById[reviewItem.id].push({
+            id: reviewFileId,
+            sourceFileId: id,
+            name: file.name,
+            mime: file.type,
+            size: file.size,
+            category: entry.category,
+            uploadedAt,
+            reviewed: false,
+            ...(reviewStoragePath ? { storagePath: reviewStoragePath } : {}),
+          });
+        }
+      }
+      await patchCourse(targetCourse.id, (course) => ({ ...course, files: [...metadata, ...(course.files || [])] }));
+      if (linkedReviews.length) {
+        await commitReviews(
+          reviews.map((item) => {
+            const additions = reviewCopiesById[item.id];
+            return additions?.length ? { ...item, files: [...additions, ...(item.files || [])] } : item;
+          })
+        );
+      }
+      showToast(`已上传 ${metadata.length} 个文件。`);
+    } catch (error) {
+      console.error("Failed to upload files for the selected course.", error);
+      window.alert(`上传失败，文件未保存。\n${error?.message || "请检查 Storage 配置和课程云端数据是否已同步。"}`);
+    } finally {
+      setUploading(false);
+      setIsFileDragActive(false);
+      fileDragDepthRef.current = 0;
+    }
+  }
+
+  async function uploadFilesToReview(reviewId, entries) {
+    let workingReviews = reviews;
+    const targetIndex = reviews.findIndex((item) => item.id === reviewId);
+    if (targetIndex === -1) return;
+
+    if (isSupabaseConfigured && supabase && !isUuid(reviews[targetIndex].id)) {
+      workingReviews = await commitReviews(reviews);
+    }
+
+    const targetItem = workingReviews[targetIndex] || workingReviews.find((item) => item.id === reviewId);
+    if (!targetItem || !entries.length || reviewUploading) return;
+    setReviewUploading(true);
+    try {
+      const metadata = [];
+      for (const entry of entries) {
+        const file = entry.file;
+        const id = isSupabaseConfigured && supabase ? crypto.randomUUID() : uid();
+        const uploadedAt = new Date().toISOString();
+        let storagePath = "";
+
+        if (isSupabaseConfigured && supabase) {
+          storagePath = `reviews/${targetItem.id}/${id}-${sanitizeFileName(file.name)}`;
+          const { error: uploadError } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, file, { upsert: true });
+          if (uploadError) throw uploadError;
+          const { error: insertError } = await supabase.from("review_files").insert({
+            id,
+            review_id: targetItem.id,
+            source_file_id: null,
+            name: file.name,
+            mime: file.type || "",
+            size: file.size || 0,
+            category: entry.category,
+            storage_path: storagePath,
+            reviewed: false,
+            uploaded_at: uploadedAt,
+          });
+          if (insertError) throw insertError;
+        } else {
+          await putFileRecord({
+            id,
+            reviewId: targetItem.id,
+            blob: file,
+            name: file.name,
+            mime: file.type,
+            size: file.size,
+            uploadedAt,
+          });
+        }
+
+        metadata.push({
+          id,
+          name: file.name,
+          mime: file.type,
+          size: file.size,
+          category: entry.category,
+          uploadedAt,
+          reviewed: false,
+          ...(storagePath ? { storagePath } : {}),
+        });
+      }
+      await patchReviewItem(targetItem.id, (item) => ({ ...item, files: [...metadata, ...(item.files || [])] }));
+      showToast(`已上传 ${metadata.length} 个复习文件。`);
+    } catch (error) {
+      console.error("Failed to upload files for the selected review item.", error);
+      window.alert(`上传失败，文件未保存。\n${error?.message || "请检查 Storage 配置和复习条目云端数据是否已同步。"}`);
+    } finally {
+      setReviewUploading(false);
+      setIsReviewFileDragActive(false);
+      reviewFileDragDepthRef.current = 0;
+    }
+  }
+
+  function toggleWeeklyField(courseId, weekNumber, field) {
+    const course = coursesWithStatusDrafts.find((item) => item.id === courseId);
+    const baseCourse = courses.find((item) => item.id === courseId);
+    const currentRecord = course ? findWeeklyRecord(course, weekNumber) : null;
+    const baseRecord = baseCourse ? findWeeklyRecord(baseCourse, weekNumber) : null;
+    if (!currentRecord || !baseRecord) return;
+
+    setStatusDrafts((prev) => {
+      const next = { ...prev };
+      const courseDraft = { ...(next[courseId] || {}) };
+      const recordDraft = { ...(courseDraft[weekNumber] || {}) };
+      recordDraft[field] = !currentRecord[field];
+
+      const nextLectureDone = recordDraft.lectureDone ?? baseRecord.lectureDone;
+      const nextHomeworkDone = recordDraft.homeworkDone ?? baseRecord.homeworkDone;
+
+      if (nextLectureDone === baseRecord.lectureDone && nextHomeworkDone === baseRecord.homeworkDone) {
+        delete courseDraft[weekNumber];
+      } else {
+        courseDraft[weekNumber] = recordDraft;
+      }
+
+      if (!Object.keys(courseDraft).length) {
+        delete next[courseId];
+      } else {
+        next[courseId] = courseDraft;
+      }
+
+      return next;
+    });
+  }
+
+  function toggleReviewWeeklyField(reviewId, weekNumber) {
+    const item = reviewsWithStatusDrafts.find((entry) => entry.id === reviewId);
+    const baseItem = reviews.find((entry) => entry.id === reviewId);
+    const currentRecord = item ? findWeeklyRecord(item, weekNumber) : null;
+    const baseRecord = baseItem ? findWeeklyRecord(baseItem, weekNumber) : null;
+    if (!currentRecord || !baseRecord) return;
+
+    setReviewStatusDrafts((prev) => {
+      const next = { ...prev };
+      const reviewDraft = { ...(next[reviewId] || {}) };
+      const recordDraft = { ...(reviewDraft[weekNumber] || {}) };
+      recordDraft.reviewDone = !currentRecord.reviewDone;
+
+      const nextReviewDone = recordDraft.reviewDone ?? baseRecord.reviewDone;
+      if (nextReviewDone === baseRecord.reviewDone) {
+        delete reviewDraft[weekNumber];
+      } else {
+        reviewDraft[weekNumber] = recordDraft;
+      }
+
+      if (!Object.keys(reviewDraft).length) {
+        delete next[reviewId];
+      } else {
+        next[reviewId] = reviewDraft;
+      }
+
+      return next;
+    });
+  }
+
+  function toggleReviewFileReviewed(reviewId, fileId) {
+    patchReviewItem(reviewId, (item) => ({
+      ...item,
+      files: (item.files || []).map((file) => (file.id === fileId ? { ...file, reviewed: !file.reviewed } : file)),
+    }));
+  }
+
+  function toggleCourseArchiveMark(courseId) {
+    patchCourse(courseId, (course) => {
+      if (calcCourseProgress(course) === 100) return course;
+      return { ...course, archiveMarked: !course.archiveMarked };
+    });
+  }
+
+  function toggleReviewArchiveMark(reviewId) {
+    patchReviewItem(reviewId, (item) => {
+      if (calcReviewProgress(item) === 100) return item;
+      return { ...item, archiveMarked: !item.archiveMarked };
+    });
+  }
+
+  async function archiveCourse(courseId) {
+    const target = courses.find((course) => course.id === courseId);
+    await patchCourse(courseId, (course) => ({ ...course, archived: true, archiveMarked: false }));
+    if (selectedCourseId === courseId) {
+      setSelectedCourseId(null);
+      if (page === "courseDetail") setPage("courses");
+    }
+    if (target) showToast(`已归档课程：${target.name}`);
+  }
+
+  function requestArchiveCourse(courseId) {
+    const target = courses.find((course) => course.id === courseId);
+    if (!target) return;
+    runWithStatusGuard(() => {
+      requestConfirmation({
+        title: "确认归档课程？",
+        description: `“${target.name}”会移动到过往课程中，之后仍可以恢复。`,
+        confirmLabel: "确认归档",
+        onConfirm: () => archiveCourse(courseId),
+      });
+    });
+  }
+
+  async function restoreCourse(courseId) {
+    const target = courses.find((course) => course.id === courseId);
+    await patchCourse(courseId, (course) => ({ ...course, archived: false, archiveMarked: false }));
+    setSelectedCourseId(courseId);
+    setPage("courses");
+    if (target) showToast(`已恢复课程：${target.name}`);
+  }
+
+  async function archiveReviewItem(reviewId) {
+    const target = reviews.find((item) => item.id === reviewId);
+    await patchReviewItem(reviewId, (item) => ({ ...item, archived: true, archiveMarked: false }));
+    if (selectedReviewId === reviewId) {
+      setSelectedReviewId(null);
+      if (page === "reviewDetail") setPage("reviews");
+    }
+    if (target) showToast(`已归档复习条目：${target.name}`);
+  }
+
+  function requestArchiveReviewItem(reviewId) {
+    const target = reviews.find((item) => item.id === reviewId);
+    if (!target) return;
+    runWithStatusGuard(() => {
+      requestConfirmation({
+        title: "确认归档复习条目？",
+        description: `“${target.name}”会移动到过往复习中，之后仍可以恢复。`,
+        confirmLabel: "确认归档",
+        onConfirm: () => archiveReviewItem(reviewId),
+      });
+    });
+  }
+
+  async function restoreReviewItem(reviewId) {
+    const target = reviews.find((item) => item.id === reviewId);
+    await patchReviewItem(reviewId, (item) => ({ ...item, archived: false, archiveMarked: false }));
+    setSelectedReviewId(reviewId);
+    setPage("reviews");
+    if (target) showToast(`已恢复复习条目：${target.name}`);
+  }
+
+  function requestArchiveMarkedCourses() {
+    const markedCourses = activeCourses.filter((course) => isCourseArchiveMarked(course));
+    if (!markedCourses.length) {
+      showToast("还没有标记需要归档的课程。");
+      return;
+    }
+    runWithStatusGuard(() => {
+      requestConfirmation({
+        title: "确认一键归档课程？",
+        description: `将归档 ${markedCourses.length} 门已标记的课程。未标记课程不会受影响。`,
+        confirmLabel: "确认归档",
+        onConfirm: async () => {
+          const markedIds = new Set(markedCourses.map((course) => course.id));
+          const nextCourses = courses.map((course) =>
+            markedIds.has(course.id) ? { ...course, archived: true, archiveMarked: false } : course
+          );
+          await commitCourses(nextCourses);
+          if (selectedCourseId && markedIds.has(selectedCourseId)) {
+            setSelectedCourseId(null);
+            if (page === "courseDetail") setPage("courses");
+          }
+          showToast(`已归档 ${markedCourses.length} 门课程。`);
+        },
+      });
+    });
+  }
+
+  function requestArchiveMarkedReviews() {
+    const markedReviewItems = activeReviewItems.filter((item) => isReviewArchiveMarked(item));
+    if (!markedReviewItems.length) {
+      showToast("还没有标记需要归档的复习条目。");
+      return;
+    }
+    runWithStatusGuard(() => {
+      requestConfirmation({
+        title: "确认一键归档复习？",
+        description: `将归档 ${markedReviewItems.length} 条已标记的复习。未标记条目不会受影响。`,
+        confirmLabel: "确认归档",
+        onConfirm: async () => {
+          const markedIds = new Set(markedReviewItems.map((item) => item.id));
+          const nextReviews = reviews.map((item) =>
+            markedIds.has(item.id) ? { ...item, archived: true, archiveMarked: false } : item
+          );
+          await commitReviews(nextReviews);
+          if (selectedReviewId && markedIds.has(selectedReviewId)) {
+            setSelectedReviewId(null);
+            if (page === "reviewDetail") setPage("reviews");
+          }
+          showToast(`已归档 ${markedReviewItems.length} 条复习。`);
+        },
+      });
+    });
+  }
+
+  async function deleteCourse(courseId) {
+    const target = courses.find((course) => course.id === courseId);
+    if (!target) return;
+    await Promise.all((target.files || []).map((file) => deleteFileRecord(file.id).catch(() => null)));
+    await commitCourses(courses.filter((course) => course.id !== courseId), [courseId]);
+    if (isSupabaseConfigured && supabase && !isUuid(courseId)) {
+      const { data: existingRows, error } = await supabase
+        .from("courses")
+        .select("id,name,teacher,kind,weekdays,time,room,archived")
+        .eq("name", target.name || "")
+        .eq("kind", target.kind || "Vorlesung")
+        .eq("time", formatTimeRangeInput(target.time || ""))
+        .eq("room", target.room || "");
+      if (!error) {
+        const duplicateIds = (existingRows || [])
+          .filter((row) => courseIdentityKey({
+            name: row.name,
+            teacher: row.teacher,
+            kind: row.kind,
+            weekdays: row.weekdays,
+            time: row.time,
+            room: row.room,
+            archived: row.archived,
+          }) === courseIdentityKey(target))
+          .map((row) => row.id);
+        if (duplicateIds.length) {
+          await supabase.from("courses").delete().in("id", duplicateIds);
+        }
+      }
+    }
+    if (selectedCourseId === courseId) {
+      setSelectedCourseId(null);
+      if (page === "courseDetail") setPage("courses");
+    }
+    showToast(`已删除课程：${target.name}`);
+  }
+
+  async function deleteReviewItem(reviewId) {
+    const target = reviews.find((item) => item.id === reviewId);
+    if (!target) return;
+    await Promise.all((target.files || []).map((file) => deleteFileRecord(file.id).catch(() => null)));
+    await commitReviews(reviews.filter((item) => item.id !== reviewId), [reviewId]);
+    if (isSupabaseConfigured && supabase && !isUuid(reviewId)) {
+      const { data: existingRows, error } = await supabase
+        .from("reviews")
+        .select("id,name,subject,source_course_id,weekdays,time,room,archived")
+        .eq("name", target.name || "")
+        .eq("subject", target.subject || "")
+        .eq("time", formatTimeRangeInput(target.time || ""))
+        .eq("room", target.room || "");
+      if (!error) {
+        const duplicateIds = (existingRows || [])
+          .filter((row) => reviewIdentityKey({
+            name: row.name,
+            subject: row.subject,
+            sourceCourseId: row.source_course_id || "",
+            weekdays: row.weekdays,
+            time: row.time,
+            room: row.room,
+            archived: row.archived,
+          }) === reviewIdentityKey(target))
+          .map((row) => row.id);
+        if (duplicateIds.length) {
+          await supabase.from("reviews").delete().in("id", duplicateIds);
+        }
+      }
+    }
+    if (selectedReviewId === reviewId) {
+      setSelectedReviewId(null);
+      if (page === "reviewDetail") setPage("reviews");
+    }
+    showToast(`已删除复习条目：${target.name}`);
+  }
+
+  function requestDeleteCourse(courseId) {
+    const target = courses.find((course) => course.id === courseId);
+    if (!target) return;
+    runWithStatusGuard(() => {
+      requestConfirmation({
+        title: "确认删除课程？",
+        description: `删除后将同时移除“${target.name}”及其所有上传文件，此操作不可撤销。`,
+        onConfirm: () => deleteCourse(courseId),
+      });
+    });
+  }
+
+  function requestDeleteReviewItem(reviewId) {
+    const target = reviews.find((item) => item.id === reviewId);
+    if (!target) return;
+    runWithStatusGuard(() => {
+      requestConfirmation({
+        title: "确认删除复习条目？",
+        description: `删除后将同时移除“${target.name}”及其所有上传文件，此操作不可撤销。`,
+        onConfirm: () => deleteReviewItem(reviewId),
+      });
+    });
+  }
+
+  function requestDeleteSelectedCourses() {
+    if (!selectedCourseIdsForBatchDelete.length) return;
+    const targets = courses.filter((course) => selectedCourseIdsForBatchDelete.includes(course.id));
+    runWithStatusGuard(() => {
+      requestConfirmation({
+        title: "确认批量删除课程？",
+        description: `将删除 ${targets.length} 门课程以及它们的文件，此操作不可撤销。`,
+        onConfirm: async () => {
+          await Promise.all(
+            targets.flatMap((course) => (course.files || []).map((file) => deleteFileRecord(file.id).catch(() => null)))
+          );
+          await commitCourses(courses.filter((course) => !selectedCourseIdsForBatchDelete.includes(course.id)), selectedCourseIdsForBatchDelete);
+          setSelectedCourseIdsForBatchDelete([]);
+          setCourseSelectionMode(false);
+          showToast(`已批量删除 ${targets.length} 门课程。`);
+        },
+      });
+    });
+  }
+
+  function requestDeleteSelectedReviews() {
+    if (!selectedReviewIdsForBatchDelete.length) return;
+    const targets = reviews.filter((item) => selectedReviewIdsForBatchDelete.includes(item.id));
+    runWithStatusGuard(() => {
+      requestConfirmation({
+        title: "确认批量删除复习条目？",
+        description: `将删除 ${targets.length} 条复习及其文件，此操作不可撤销。`,
+        onConfirm: async () => {
+          await Promise.all(
+            targets.flatMap((item) => (item.files || []).map((file) => deleteFileRecord(file.id).catch(() => null)))
+          );
+          await commitReviews(reviews.filter((item) => !selectedReviewIdsForBatchDelete.includes(item.id)), selectedReviewIdsForBatchDelete);
+          setSelectedReviewIdsForBatchDelete([]);
+          setReviewSelectionMode(false);
+          showToast(`已批量删除 ${targets.length} 条复习。`);
+        },
+      });
+    });
+  }
+
+  async function handleUpload(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    await uploadFilesToCourse(
+      selectedCourse?.id,
+      files.map((file) => ({ file, category: uploadCategory }))
+    );
+  }
+
+  async function handleReviewUpload(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    await uploadFilesToReview(
+      selectedReview?.id,
+      files.map((file) => ({ file, category: reviewUploadCategory }))
+    );
+  }
+
+  function handleFileDragEnter(event) {
+    if (uploading) return;
+    event.preventDefault();
+    event.stopPropagation();
+    fileDragDepthRef.current += 1;
+    setIsFileDragActive(true);
+  }
+
+  function handleFileDragOver(event) {
+    if (uploading) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!isFileDragActive) setIsFileDragActive(true);
+  }
+
+  function handleFileDragLeave(event) {
+    if (uploading) return;
+    event.preventDefault();
+    event.stopPropagation();
+    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1);
+    if (fileDragDepthRef.current === 0) {
+      setIsFileDragActive(false);
+    }
+  }
+
+  async function handleFileDrop(event) {
+    if (uploading) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const files = Array.from(event.dataTransfer?.files || []);
+    await uploadFilesToCourse(
+      selectedCourse?.id,
+      files.map((file) => ({ file, category: uploadCategory }))
+    );
+  }
+
+  function handleReviewFileDragEnter(event) {
+    if (reviewUploading) return;
+    event.preventDefault();
+    event.stopPropagation();
+    reviewFileDragDepthRef.current += 1;
+    setIsReviewFileDragActive(true);
+  }
+
+  function handleReviewFileDragOver(event) {
+    if (reviewUploading) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!isReviewFileDragActive) setIsReviewFileDragActive(true);
+  }
+
+  function handleReviewFileDragLeave(event) {
+    if (reviewUploading) return;
+    event.preventDefault();
+    event.stopPropagation();
+    reviewFileDragDepthRef.current = Math.max(0, reviewFileDragDepthRef.current - 1);
+    if (reviewFileDragDepthRef.current === 0) {
+      setIsReviewFileDragActive(false);
+    }
+  }
+
+  async function handleReviewFileDrop(event) {
+    if (reviewUploading) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const files = Array.from(event.dataTransfer?.files || []);
+    await uploadFilesToReview(
+      selectedReview?.id,
+      files.map((file) => ({ file, category: reviewUploadCategory }))
+    );
+  }
+
+  async function openStoredFile(fileMeta, download = false) {
+    setBusyFileId(fileMeta.id);
+    const openedWindow = download ? null : window.open("", "_blank", "noopener,noreferrer");
+    try {
+      let blob = null;
+      let storagePath = fileMeta.storagePath || "";
+
+      if (isSupabaseConfigured && supabase && isUuid(fileMeta.id)) {
+        const { data: currentRow, error: fetchRowError } = await supabase
+          .from("course_files")
+          .select("storage_path")
+          .eq("id", fileMeta.id)
+          .maybeSingle();
+        if (fetchRowError) throw fetchRowError;
+        storagePath = currentRow?.storage_path || storagePath;
+      }
+
+      if (storagePath && isSupabaseConfigured && supabase) {
+        const { data, error } = await supabase.storage.from(STORAGE_BUCKET).download(storagePath);
+        if (!error && data) {
+          blob = data;
+        } else {
+          const { data: signedData, error: signedUrlError } = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(storagePath, 60);
+          if (signedUrlError) throw error || signedUrlError;
+          if (download) {
+            const link = document.createElement("a");
+            link.href = signedData.signedUrl;
+            link.download = fileMeta.name;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+          } else if (openedWindow) {
+            openedWindow.location.href = signedData.signedUrl;
+          } else {
+            window.open(signedData.signedUrl, "_blank", "noopener,noreferrer");
+          }
+          return;
+        }
+      } else {
+        const record = await getFileRecord(fileMeta.id);
+        if (!record?.blob) return;
+        blob = new Blob([record.blob], { type: record.mime });
+      }
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileMeta.name;
+      if (download) {
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      } else {
+        if (openedWindow) {
+          openedWindow.location.href = url;
+        } else {
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+        }
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 15000);
+    } catch (error) {
+      if (openedWindow && !openedWindow.closed) openedWindow.close();
+      console.error("Failed to open course file.", error);
+      window.alert(`文件操作失败。\n${error?.message || "请稍后重试。"}`);
+    } finally {
+      setBusyFileId(null);
+    }
+  }
+
+  async function openStoredReviewFile(fileMeta, download = false) {
+    setReviewBusyFileId(fileMeta.id);
+    const openedWindow = download ? null : window.open("", "_blank", "noopener,noreferrer");
+    try {
+      let blob = null;
+      let storagePath = fileMeta.storagePath || "";
+
+      if (isSupabaseConfigured && supabase && isUuid(fileMeta.id)) {
+        const { data: currentRow, error: fetchRowError } = await supabase
+          .from("review_files")
+          .select("storage_path")
+          .eq("id", fileMeta.id)
+          .maybeSingle();
+        if (fetchRowError) throw fetchRowError;
+        storagePath = currentRow?.storage_path || storagePath;
+      }
+
+      if (storagePath && isSupabaseConfigured && supabase) {
+        const { data, error } = await supabase.storage.from(STORAGE_BUCKET).download(storagePath);
+        if (!error && data) {
+          blob = data;
+        } else {
+          const { data: signedData, error: signedUrlError } = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(storagePath, 60);
+          if (signedUrlError) throw error || signedUrlError;
+          if (download) {
+            const link = document.createElement("a");
+            link.href = signedData.signedUrl;
+            link.download = fileMeta.name;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+          } else if (openedWindow) {
+            openedWindow.location.href = signedData.signedUrl;
+          } else {
+            window.open(signedData.signedUrl, "_blank", "noopener,noreferrer");
+          }
+          return;
+        }
+      } else {
+        const record = await getFileRecord(fileMeta.id);
+        if (!record?.blob) return;
+        blob = new Blob([record.blob], { type: record.mime });
+      }
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileMeta.name;
+      if (download) {
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      } else {
+        if (openedWindow) {
+          openedWindow.location.href = url;
+        } else {
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+        }
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 15000);
+    } catch (error) {
+      if (openedWindow && !openedWindow.closed) openedWindow.close();
+      console.error("Failed to open review file.", error);
+      window.alert(`文件操作失败。\n${error?.message || "请稍后重试。"}`);
+    } finally {
+      setReviewBusyFileId(null);
+    }
+  }
+
+  async function removeFile(courseId, fileId) {
+    const course = courses.find((item) => item.id === courseId);
+    const targetFile = course?.files?.find((file) => file.id === fileId);
+    try {
+      if (targetFile?.storagePath && isSupabaseConfigured && supabase) {
+        const { error: storageError } = await supabase.storage.from(STORAGE_BUCKET).remove([targetFile.storagePath]);
+        if (storageError) throw storageError;
+        const { error: rowDeleteError } = await supabase.from("course_files").delete().eq("id", fileId);
+        if (rowDeleteError) throw rowDeleteError;
+      } else {
+        await deleteFileRecord(fileId).catch(() => null);
+      }
+      await patchCourse(courseId, (currentCourse) => ({ ...currentCourse, files: (currentCourse.files || []).filter((file) => file.id !== fileId) }));
+      showToast("文件已删除。");
+    } catch (error) {
+      console.error("Failed to remove course file.", error);
+      window.alert(`删除文件失败。\n${error?.message || "请稍后重试。"}`);
+    }
+  }
+
+  async function removeReviewFile(reviewId, fileId) {
+    const reviewItem = reviews.find((entry) => entry.id === reviewId);
+    const targetFile = reviewItem?.files?.find((file) => file.id === fileId);
+    try {
+      if (targetFile?.storagePath && isSupabaseConfigured && supabase) {
+        const { error: storageError } = await supabase.storage.from(STORAGE_BUCKET).remove([targetFile.storagePath]);
+        if (storageError) throw storageError;
+        const { error: rowDeleteError } = await supabase.from("review_files").delete().eq("id", fileId);
+        if (rowDeleteError) throw rowDeleteError;
+      } else {
+        await deleteFileRecord(fileId).catch(() => null);
+      }
+      await patchReviewItem(reviewId, (item) => ({ ...item, files: (item.files || []).filter((file) => file.id !== fileId) }));
+      showToast("复习文件已删除。");
+    } catch (error) {
+      console.error("Failed to remove review file.", error);
+      window.alert(`删除文件失败。\n${error?.message || "请稍后重试。"}`);
+    }
+  }
+
+  async function syncReviewFilesFromCourse(reviewId) {
+    const reviewItem = reviews.find((item) => item.id === reviewId);
+    if (!reviewItem) return;
+    const sourceCourse = courses.find((course) => course.id === reviewItem.sourceCourseId);
+    if (!sourceCourse) return;
+
+    const existingSourceIds = new Set((reviewItem.files || []).map((file) => file.sourceFileId).filter(Boolean));
+    const missingCourseFiles = (sourceCourse.files || []).filter((file) => !existingSourceIds.has(file.id));
+    if (!missingCourseFiles.length) {
+      showToast("复习文件已经与课程文件同步。");
+      return;
+    }
+
+    setReviewUploading(true);
+    try {
+      const restoredFiles = [];
+      for (const sourceFile of missingCourseFiles) {
+        if (sourceFile.storagePath && isSupabaseConfigured && supabase) {
+          const nextId = crypto.randomUUID();
+          const targetPath = `reviews/${reviewId}/${nextId}-${sanitizeFileName(sourceFile.name)}`;
+          const { error: copyError } = await supabase.storage.from(STORAGE_BUCKET).copy(sourceFile.storagePath, targetPath);
+          if (copyError) throw copyError;
+          const { error: insertError } = await supabase.from("review_files").insert({
+            id: nextId,
+            review_id: reviewId,
+            source_file_id: isUuid(sourceFile.id) ? sourceFile.id : null,
+            name: sourceFile.name,
+            mime: sourceFile.mime || "",
+            size: sourceFile.size || 0,
+            category: sourceFile.category,
+            storage_path: targetPath,
+            reviewed: false,
+            uploaded_at: sourceFile.uploadedAt || new Date().toISOString(),
+          });
+          if (insertError) throw insertError;
+          restoredFiles.push({
+            ...sourceFile,
+            id: nextId,
+            sourceFileId: sourceFile.id,
+            reviewed: false,
+            storagePath: targetPath,
+          });
+          continue;
+        }
+
+        const record = await getFileRecord(sourceFile.id).catch(() => null);
+        if (!record?.blob) continue;
+        const nextId = uid();
+        const blob = new Blob([record.blob], { type: sourceFile.mime });
+        await putFileRecord({
+          id: nextId,
+          reviewId,
+          blob,
+          name: sourceFile.name,
+          mime: sourceFile.mime,
+          size: sourceFile.size,
+          uploadedAt: sourceFile.uploadedAt || new Date().toISOString(),
+        });
+        restoredFiles.push({
+          ...sourceFile,
+          id: nextId,
+          sourceFileId: sourceFile.id,
+          reviewed: false,
+        });
+      }
+      if (restoredFiles.length) {
+        patchReviewItem(reviewId, (item) => ({ ...item, files: [...restoredFiles, ...(item.files || [])] }));
+        showToast(`已同步恢复 ${restoredFiles.length} 个课程文件。`);
+      } else {
+        showToast("课程文件没有可恢复的内容。");
+      }
+    } catch (error) {
+      console.error("Failed to sync review files from course.", error);
+      window.alert("同步复习文件失败。");
+    } finally {
+      setReviewUploading(false);
+    }
+  }
+
+  function requestRemoveFile(courseId, fileId) {
+    const course = courses.find((item) => item.id === courseId);
+    const file = course?.files?.find((item) => item.id === fileId);
+    requestConfirmation({
+      title: "确认删除文件？",
+      description: file ? `确定要删除文件“${file.name}”吗？` : "确定要删除这个文件吗？",
+      onConfirm: () => removeFile(courseId, fileId),
+    });
+  }
+
+  function requestRemoveReviewFile(reviewId, fileId) {
+    const item = reviews.find((entry) => entry.id === reviewId);
+    const file = item?.files?.find((entry) => entry.id === fileId);
+    requestConfirmation({
+      title: "确认删除文件？",
+      description: file ? `确定要删除文件“${file.name}”吗？` : "确定要删除这个文件吗？",
+      onConfirm: () => removeReviewFile(reviewId, fileId),
+    });
+  }
+
+  return (
+    <div className="min-h-screen bg-zinc-100 text-zinc-900">
+      <div className="mx-auto max-w-7xl p-4 md:p-6">
+        <div className="mb-6 rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-600">
+                <GraduationCap className="h-3.5 w-3.5" />
+                学期课程中心
+              </div>
+              <h1 className="text-3xl font-semibold tracking-tight text-zinc-950">学期课程总览与打卡</h1>
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-500">
+                学期范围：{TERM_START} - {TERM_END}。首页看总览，“本学期课程”与“复习模块”看详情，“课程状态”和“复习状态”看本周完成情况，“过往课程”和“过往复习”看历史内容。
+              </p></div>
+            <div className="flex flex-wrap items-center gap-3">
+              <NavTab active={page === "overview"} icon={<LayoutDashboard className="h-4 w-4" />} label="总览" onClick={() => navigateToPage("overview")} />
+              <NavTab active={page === "courses" || page === "courseDetail"} icon={<BookOpen className="h-4 w-4" />} label="本学期课程" onClick={() => navigateToPage("courses")} />
+              <NavTab active={page === "status"} icon={<CalendarDays className="h-4 w-4" />} label="课程状态" onClick={() => navigateToPage("status")} />
+              <NavTab active={page === "reviews" || page === "reviewDetail"} icon={<ClipboardList className="h-4 w-4" />} label="复习模块" onClick={() => navigateToPage("reviews")} />
+              <NavTab active={page === "reviewStatus"} icon={<CheckCircle2 className="h-4 w-4" />} label="复习状态" onClick={() => navigateToPage("reviewStatus")} />
+              <NavTab active={page === "archive"} icon={<Archive className="h-4 w-4" />} label="过往课程" onClick={() => navigateToPage("archive")} />
+              <NavTab active={page === "reviewArchive"} icon={<Archive className="h-4 w-4" />} label="过往复习" onClick={() => navigateToPage("reviewArchive")} />
+            </div>
+          </div>
+        </div>
+
+        <AnimatePresence>
+          {hasUnsavedStatusChanges ? (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.18 }}
+              className="sticky top-4 z-40 mb-6 rounded-[2rem] border border-amber-200 bg-amber-50/95 p-4 shadow-sm backdrop-blur"
+            >
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-amber-900">你有未保存的状态修改</div>
+                  <div className="mt-1 text-sm text-amber-800">
+                    已修改 {allStatusDraftSummary.fieldCount} 项状态，其中课程 {allStatusDraftSummary.courseFieldCount} 项，复习 {allStatusDraftSummary.reviewFieldCount} 项。
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <MotionButton
+                    onClick={discardAllStatusChanges}
+                    className="rounded-2xl border border-amber-300 bg-white px-4 py-3 text-sm font-medium text-amber-900 hover:bg-amber-100"
+                  >
+                    放弃修改
+                  </MotionButton>
+                  <MotionButton
+                    onClick={saveAllStatusChanges}
+                    className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800"
+                  >
+                    保存状态
+                  </MotionButton>
+                </div>
+              </div>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+
+        {isBootstrapping ? (
+          <SectionCard title="正在加载数据" subtitle={isSupabaseConfigured ? "正在从云端读取课程与复习数据。" : "正在读取本地课程与复习数据。"}>
+            <div className="text-sm text-zinc-500">请稍等，页面数据正在初始化。</div>
+          </SectionCard>
+        ) : null}
+
+        {!isBootstrapping && isMigratingLegacyFiles ? (
+          <SectionCard title="正在迁移旧文件" subtitle="检测到浏览器里还有历史本地文件，正在上传到云端。">
+            <div className="text-sm text-zinc-500">迁移完成后，旧文件也会和新文件一样长期保存在 Supabase Storage 中。</div>
+          </SectionCard>
+        ) : null}
+
+        {!isBootstrapping && page === "overview" ? (
+          <div className="space-y-6">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+              <StatCard icon={<BookOpen className="h-5 w-5" />} label="本学期课程" value={stats.activeCount} helper="当前学期正在进行的课程" />
+              <StatCard icon={<CheckCircle2 className="h-5 w-5" />} label="课程本周已完成" value={stats.bothDone} helper={`当前周：${currentWeekLabel}`} />
+              <StatCard icon={<ClipboardList className="h-5 w-5" />} label="课程本周未完成" value={stats.unfinished} helper="上课或作业仍未完成" />
+              <StatCard icon={<ClipboardList className="h-5 w-5" />} label="复习条目" value={reviewStats.count} helper={`待复习：${reviewStats.pending} · 已归档：${reviewStats.archivedCount}`} />
+              <StatCard icon={<FileText className="h-5 w-5" />} label="资料总数" value={stats.filesCount + reviewStats.filesCount} helper={`已归档课程：${stats.archivedCount}`} />
+            </div>
+
+            <SectionCard title="本周提醒" subtitle="这里只显示当前周还没完成的内容。">
+              {stats.unfinished > 0 ? (
+                <div className="space-y-3">
+                  {weeklyOverviewRows
+                    .filter((course) => !(course.currentRecord?.lectureDone && course.currentRecord?.homeworkDone))
+                    .map((course) => (
+                      <div key={course.id} className="rounded-3xl border border-rose-200 bg-rose-50 p-4">
+                        <div className="font-medium text-zinc-900">{course.name}</div>
+                        <div className="mt-1 text-sm text-zinc-600">{getEntityScheduleLabel(course) || "时间待定"}</div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {!course.currentRecord?.lectureDone ? <span className="rounded-full bg-white px-3 py-2 text-xs font-medium text-rose-700">这周还没上课</span> : null}
+                          {!course.currentRecord?.homeworkDone ? <span className="rounded-full bg-white px-3 py-2 text-xs font-medium text-rose-700">这周作业还没完成</span> : null}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              ) : (
+                <EmptyState title="本周都完成了" description="当前学期的课程本周都已经打卡完成。" />
+              )}
+            </SectionCard>
+          </div>
+        ) : null}
+
+        {!isBootstrapping && page === "status" ? (
+          <SectionCard
+            title="课程状态"
+            subtitle={`当前周：${currentWeekLabel}。这里集中展示课程本周的完成情况。${hasUnsavedCourseStatusChanges ? ` 当前还有 ${statusDraftSummary.fieldCount} 项课程状态修改未保存。` : ""}`}
+            right={
+              <StatusActionBar
+                hasUnsavedStatusChanges={hasUnsavedCourseStatusChanges}
+                changedCount={statusDraftSummary.fieldCount}
+                onDiscard={discardStatusChanges}
+                onSave={saveStatusChanges}
+                sticky
+              />
+            }
+          >
+            {weeklyOverviewRows.length ? (
+              <div className="overflow-x-auto">
+                <table className="min-w-full border-separate border-spacing-y-3">
+                  <thead>
+                    <tr className="text-left text-sm text-zinc-500">
+                      <th className="px-3">课程</th>
+                      <th className="px-3">时间</th>
+                      <th className="px-3">Vorlesung</th>
+                      <th className="px-3">Hausaufgabe</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {weeklyOverviewRows.map((course) => {
+                      const lectureDone = Boolean(course.currentRecord?.lectureDone);
+                      const homeworkDone = Boolean(course.currentRecord?.homeworkDone);
+                      return (
+                        <tr key={course.id} className="bg-zinc-50 text-sm shadow-sm">
+                          <td className="rounded-l-3xl px-3 py-4 align-middle">
+                            <div className="font-semibold text-zinc-900">{course.name}</div>
+                            <div className="mt-1 text-xs text-zinc-500">{course.kind}</div>
+                          </td>
+                          <td className="px-3 py-4 align-middle text-zinc-600">
+                            <div>{getEntityScheduleLabel(course) || "时间待定"}</div>
+                          </td>
+                          <td className="px-3 py-4 align-middle">
+                            <StatusPill done={lectureDone} doneLabel="已上" todoLabel="未上" onClick={() => toggleWeeklyField(course.id, currentWeekNumber, "lectureDone")} />
+                          </td>
+                          <td className="rounded-r-3xl px-3 py-4 align-middle">
+                            <StatusPill done={homeworkDone} doneLabel="已写" todoLabel="未写" onClick={() => toggleWeeklyField(course.id, currentWeekNumber, "homeworkDone")} />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState title="还没有课程" description="先导入模板课程，或者手动新建一门课程。" />
+            )}
+          </SectionCard>
+        ) : null}
+
+        {!isBootstrapping && page === "courses" ? (
+          <SectionCard
+            title="本学期课程"
+            subtitle="列表页展示课程概览，并支持按星期、完成状态、文件情况筛选。点击“查看”进入单独的课程详情页。"
+            stickyHeader
+            right={
+              <StickyActionToolbar>
+                <div className="relative w-56">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="搜索课程"
+                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 py-3 pl-10 pr-4 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                  />
+                </div>
+                <select
+                  value={weekdayFilter}
+                  onChange={(e) => setWeekdayFilter(e.target.value)}
+                  className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                >
+                  <option>全部星期</option>
+                  {DAY_ORDER.map((day) => (
+                    <option key={day}>{day}</option>
+                  ))}
+                </select>
+                <MotionButton
+                  onClick={() => setUnfinishedOnly((prev) => !prev)}
+                  className={classNames(
+                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
+                    unfinishedOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                  )}
+                >
+                  只看未完成
+                </MotionButton>
+                <MotionButton
+                  onClick={() => setHasFilesOnly((prev) => !prev)}
+                  className={classNames(
+                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
+                    hasFilesOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                  )}
+                >
+                  只看有文件
+                </MotionButton>
+                <MotionButton
+                  onClick={requestArchiveMarkedCourses}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-sm font-medium text-amber-800 hover:bg-amber-100"
+                >
+                  <Archive className="h-4 w-4" />
+                  一键归档已标记 {markedCourseCount ? `(${markedCourseCount})` : ""}
+                </MotionButton>
+                <MotionButton
+                  onClick={() => {
+                    setCourseSelectionMode((prev) => !prev);
+                    setSelectedCourseIdsForBatchDelete([]);
+                  }}
+                  className={classNames(
+                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
+                    courseSelectionMode ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                  )}
+                >
+                  {courseSelectionMode ? "取消批量删除" : "批量删除"}
+                </MotionButton>
+                {courseSelectionMode ? (
+                  <>
+                    <MotionButton
+                      onClick={toggleSelectAllCourses}
+                      className="rounded-2xl border border-zinc-200 bg-white px-3 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                    >
+                      {selectedCourseIdsForBatchDelete.length === filteredCourses.length && filteredCourses.length ? "取消全选" : "全选当前列表"}
+                    </MotionButton>
+                    <MotionButton
+                      onClick={requestDeleteSelectedCourses}
+                      disabled={!selectedCourseIdsForBatchDelete.length}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-3 text-sm font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      删除已选 {selectedCourseIdsForBatchDelete.length ? `(${selectedCourseIdsForBatchDelete.length})` : ""}
+                    </MotionButton>
+                  </>
+                ) : null}
+                <MotionButton onClick={openCreateModal} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-3 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+                  <Plus className="h-4 w-4" />
+                  新建
+                </MotionButton>
+              </StickyActionToolbar>
+            }
+          >
+            <div className="space-y-4">
+              {filteredCourses.length ? (
+                filteredCourses.map((course) => (
+                  <CourseCard
+                    key={course.id}
+                    course={course}
+                    currentWeekNumber={currentWeekNumber}
+                    selected={selectedCourseId === course.id}
+                    onOpen={() => openCourse(course.id)}
+                    onEdit={() => openEditModal(course)}
+                    onDelete={() => requestDeleteCourse(course.id)}
+                    onArchive={() => requestArchiveCourse(course.id)}
+                    onToggleArchiveMark={() => toggleCourseArchiveMark(course.id)}
+                    selectionMode={courseSelectionMode}
+                    checked={selectedCourseIdsForBatchDelete.includes(course.id)}
+                    onToggleSelect={() => toggleCourseBatchSelection(course.id)}
+                  />
+                ))
+              ) : (
+                <EmptyState title="没有匹配课程" description="可以清空搜索，或者新建一门课程。" />
+              )}
+            </div>
+          </SectionCard>
+        ) : null}
+
+        {!isBootstrapping && page === "courseDetail" ? (
+          selectedCourse ? (
+            <div className="space-y-6">
+              <SectionCard
+                title="课程详情"
+                subtitle="这里集中展示这门课的当前信息、本周状态、本周摘要、每周记录和文件上传。"
+                right={
+                  <MotionButton onClick={() => navigateToPage("courses")} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                    <ArrowLeft className="h-4 w-4" />
+                    返回课程列表
+                  </MotionButton>
+                }
+              >
+                <div className="rounded-[2rem] border border-zinc-200 bg-zinc-50 p-6">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <div className="mb-2 inline-flex rounded-full bg-white px-3 py-1 text-xs font-medium text-zinc-600">{selectedCourse.kind}</div>
+                      <h2 className="text-2xl font-semibold text-zinc-950">{selectedCourse.name}</h2>
+                      <p className="mt-2 text-sm text-zinc-500">
+                        {getEntityScheduleLabel(selectedCourse) || "时间待定"}
+                        {selectedCourse.room ? ` · ${selectedCourse.room}` : ""}
+                        {selectedCourse.teacher ? ` · ${selectedCourse.teacher}` : ""}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <MotionButton onClick={() => openEditModal(selectedCourse)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                        <Pencil className="h-4 w-4" />
+                        编辑
+                      </MotionButton>
+                      <MotionButton
+                        onClick={() => toggleCourseArchiveMark(selectedCourse.id)}
+                        disabled={calcCourseProgress(selectedCourse) === 100}
+                        className={classNames(
+                          "inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium",
+                          isCourseArchiveMarked(selectedCourse)
+                            ? "border border-amber-200 bg-amber-50 text-amber-800"
+                            : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
+                          calcCourseProgress(selectedCourse) === 100 ? "cursor-not-allowed opacity-70" : ""
+                        )}
+                      >
+                        <CheckCircle2 className="h-4 w-4" />
+                        {calcCourseProgress(selectedCourse) === 100 ? "已自动标记归档" : selectedCourse.archiveMarked ? "取消归档标记" : "标记归档"}
+                      </MotionButton>
+                      <MotionButton onClick={() => requestArchiveCourse(selectedCourse.id)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                        <Archive className="h-4 w-4" />
+                        归档
+                      </MotionButton>
+                      <MotionButton onClick={() => requestDeleteCourse(selectedCourse.id)} className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-4 py-3 text-sm font-medium text-red-600 hover:bg-red-50">
+                        <Trash2 className="h-4 w-4" />
+                        删除
+                      </MotionButton>
+                    </div>
+                  </div>
+                </div>
+              </SectionCard>
+
+              <SectionCard
+                title="本周状态"
+                subtitle={`当前周：${currentWeekLabel}`}
+                right={
+                  <StatusActionBar
+                    hasUnsavedStatusChanges={hasUnsavedCourseStatusChanges}
+                    changedCount={statusDraftSummary.fieldCount}
+                    onDiscard={discardStatusChanges}
+                    onSave={saveStatusChanges}
+                    sticky
+                  />
+                }
+              >
+                <div className="grid gap-4 md:grid-cols-3">
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">上课状态</div>
+                    <div className="mt-3">
+                      <StatusPill
+                        done={Boolean(selectedCourseCurrentRecord?.lectureDone)}
+                        doneLabel="本周已上课"
+                        todoLabel="本周未上课"
+                        onClick={() => toggleWeeklyField(selectedCourse.id, currentWeekNumber, "lectureDone")}
+                      />
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">作业状态</div>
+                    <div className="mt-3">
+                      <StatusPill
+                        done={Boolean(selectedCourseCurrentRecord?.homeworkDone)}
+                        doneLabel="本周已写作业"
+                        todoLabel="本周未写作业"
+                        onClick={() => toggleWeeklyField(selectedCourse.id, currentWeekNumber, "homeworkDone")}
+                      />
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">总体状态</div>
+                    <div className={classNames("mt-3 inline-flex rounded-full px-3 py-2 text-sm font-medium", selectedCourseCurrentRecord?.lectureDone && selectedCourseCurrentRecord?.homeworkDone ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
+                      {selectedCourseCurrentRecord?.lectureDone && selectedCourseCurrentRecord?.homeworkDone ? "本周已全部完成" : "本周还有待完成项"}
+                    </div>
+                  </div>
+                </div>
+              </SectionCard>
+
+              <SectionCard title="当前信息" subtitle="这些信息与新建课程时填写的字段一致。">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">课程名称</div>
+                    <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.name || "未填写"}</div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">授课教师</div>
+                    <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.teacher || "未填写"}</div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">课程类型</div>
+                    <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.kind || "未填写"}</div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">星期</div>
+                    <div className="mt-2 text-sm font-medium text-zinc-900">{getScheduleWeekdays(getEntityScheduleEntries(selectedCourse)).join(" / ") || "未填写"}</div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">上课时间</div>
+                    <div className="mt-2 text-sm font-medium text-zinc-900">{getEntityScheduleLabel(selectedCourse) || "未填写"}</div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">教室 / 地点</div>
+                    <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.room || "未填写"}</div>
+                  </div>
+                </div>
+              </SectionCard>
+
+              <SectionCard title="本周摘要" subtitle="这里汇总这门课本周还要处理的事项，以及最近上传的资料。">
+                <div className="grid gap-4 xl:grid-cols-2">
+                  <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-sm font-semibold text-zinc-900">本周待办</div>
+                    {selectedCourseTodoItems.length ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {selectedCourseTodoItems.map((item) => (
+                          <span key={item} className="rounded-full bg-rose-100 px-3 py-2 text-xs font-medium text-rose-700">
+                            {item}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="mt-3 rounded-2xl bg-emerald-100 px-3 py-3 text-sm font-medium text-emerald-700">本周这门课已经全部完成。</div>
+                    )}
+                  </div>
+                  <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-semibold text-zinc-900">最近上传</div>
+                      <span className="rounded-full bg-white px-3 py-1 text-xs text-zinc-500">{selectedCourseRecentFiles.length} 个最近文件</span>
+                    </div>
+                    {selectedCourseRecentFiles.length ? (
+                      <div className="mt-3 space-y-3">
+                        {selectedCourseRecentFiles.map((file) => (
+                          <div key={file.id} className="rounded-2xl border border-zinc-200 bg-white px-4 py-3">
+                            <div className="text-sm font-medium text-zinc-900">{file.name}</div>
+                            <div className="mt-1 text-xs text-zinc-500">{file.category} · {formatDateTime(file.uploadedAt)}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="mt-3 text-sm text-zinc-500">这门课还没有上传过资料。</div>
+                    )}
+                  </div>
+                </div>
+              </SectionCard>
+
+              <SectionCard
+                title="课程文件"
+                subtitle="上传和管理当前课程的文件都放在这里。"
+                right={
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={uploadCategory}
+                      onChange={(e) => setUploadCategory(e.target.value)}
+                      className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                    >
+                      {FILE_CATEGORIES.map((category) => (
+                        <option key={category}>{category}</option>
+                      ))}
+                    </select>
+                    <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUpload} />
+                    <MotionButton
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploading}
+                      className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+                    >
+                      <Upload className="h-4 w-4" />
+                      {uploading ? "上传中..." : `上传到${uploadCategory}`}
+                    </MotionButton>
+                  </div>
+                }
+              >
+                <div className="space-y-4">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    onDragEnter={handleFileDragEnter}
+                    onDragOver={handleFileDragOver}
+                    onDragLeave={handleFileDragLeave}
+                    onDrop={handleFileDrop}
+                    className={classNames(
+                      "w-full rounded-3xl border-2 border-dashed px-5 py-6 text-left transition",
+                      isFileDragActive ? "border-zinc-900 bg-zinc-100" : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-white"
+                    )}
+                  >
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-900">{uploading ? "正在上传文件..." : "拖拽文件到这里，或点击选择文件"}</div>
+                        <div className="mt-1 text-sm text-zinc-500">会按当前分类“{uploadCategory}”直接上传到这门课里。</div>
+                      </div>
+                      <span className="rounded-full bg-white px-3 py-2 text-xs font-medium text-zinc-600 shadow-sm">
+                        支持多文件
+                      </span>
+                    </div>
+                  </button>
+                  {selectedCourseFiles.map((group) => (
+                    <FileSection
+                      key={group.category}
+                      title={group.category}
+                      files={group.items}
+                      busyFileId={busyFileId}
+                      onOpen={(file) => openStoredFile(file, false)}
+                      onDownload={(file) => openStoredFile(file, true)}
+                      onDelete={(fileId) => requestRemoveFile(selectedCourse.id, fileId)}
+                    />
+                  ))}
+                </div>
+              </SectionCard>
+
+              <SectionCard
+                title="每周记录"
+                subtitle="按周切换上课与作业完成状态。"
+                right={
+                  <StatusActionBar
+                    hasUnsavedStatusChanges={hasUnsavedCourseStatusChanges}
+                    changedCount={statusDraftSummary.fieldCount}
+                    onDiscard={discardStatusChanges}
+                    onSave={saveStatusChanges}
+                    sticky
+                  />
+                }
+              >
+                <div className="overflow-x-auto">
+                  <table className="min-w-full border-separate border-spacing-y-2">
+                    <thead>
+                      <tr className="text-left text-sm text-zinc-500">
+                        <th className="px-3">周次</th>
+                        <th className="px-3">上课</th>
+                        <th className="px-3">作业</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedCourse.weeklyRecords.map((record) => {
+                        const isCurrentWeek = record.weekNumber === currentWeekNumber;
+                        return (
+                          <tr key={record.id} className={classNames("bg-zinc-50 text-sm shadow-sm", isCurrentWeek ? "ring-1 ring-zinc-300" : "") }>
+                            <td className="rounded-l-3xl px-3 py-3 align-middle">
+                              <div className="font-medium text-zinc-900">{record.label}</div>
+                              {isCurrentWeek ? <div className="mt-1 text-xs text-zinc-500">当前周</div> : null}
+                            </td>
+                            <td className="px-3 py-3 align-middle">
+                              <StatusPill done={record.lectureDone} doneLabel="已上" todoLabel="未上" onClick={() => toggleWeeklyField(selectedCourse.id, record.weekNumber, "lectureDone")} />
+                            </td>
+                            <td className="rounded-r-3xl px-3 py-3 align-middle">
+                              <StatusPill done={record.homeworkDone} doneLabel="已写" todoLabel="未写" onClick={() => toggleWeeklyField(selectedCourse.id, record.weekNumber, "homeworkDone")} />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </SectionCard>
+            </div>
+          ) : (
+            <EmptyState
+              title="没有可查看的课程"
+              description="这门课程可能已经被归档或删除。"
+              action={
+                <MotionButton onClick={() => navigateToPage("courses")} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+                  <ArrowLeft className="h-4 w-4" />
+                  返回课程列表
+                </MotionButton>
+              }
+            />
+          )
+        ) : null}
+
+        {!isBootstrapping && page === "reviews" ? (
+          <SectionCard
+            title="复习模块"
+            subtitle="这里管理所有复习条目。新建时直接从本学期课程里选择，并复制课程文件作为复习文件。"
+            stickyHeader
+            right={
+              <StickyActionToolbar>
+                <div className="relative w-56">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+                  <input
+                    value={reviewQuery}
+                    onChange={(e) => setReviewQuery(e.target.value)}
+                    placeholder="搜索复习条目"
+                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 py-3 pl-10 pr-4 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                  />
+                </div>
+                <select
+                  value={reviewWeekdayFilter}
+                  onChange={(e) => setReviewWeekdayFilter(e.target.value)}
+                  className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                >
+                  <option>全部星期</option>
+                  {DAY_ORDER.map((day) => (
+                    <option key={day}>{day}</option>
+                  ))}
+                </select>
+                <MotionButton
+                  onClick={() => setReviewUnfinishedOnly((prev) => !prev)}
+                  className={classNames(
+                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
+                    reviewUnfinishedOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                  )}
+                >
+                  只看未复习
+                </MotionButton>
+                <MotionButton
+                  onClick={() => setReviewHasFilesOnly((prev) => !prev)}
+                  className={classNames(
+                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
+                    reviewHasFilesOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                  )}
+                >
+                  只看有文件
+                </MotionButton>
+                <MotionButton
+                  onClick={requestArchiveMarkedReviews}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-sm font-medium text-amber-800 hover:bg-amber-100"
+                >
+                  <Archive className="h-4 w-4" />
+                  一键归档已标记 {markedReviewCount ? `(${markedReviewCount})` : ""}
+                </MotionButton>
+                <MotionButton
+                  onClick={() => {
+                    setReviewSelectionMode((prev) => !prev);
+                    setSelectedReviewIdsForBatchDelete([]);
+                  }}
+                  className={classNames(
+                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
+                    reviewSelectionMode ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                  )}
+                >
+                  {reviewSelectionMode ? "取消批量删除" : "批量删除"}
+                </MotionButton>
+                {reviewSelectionMode ? (
+                  <>
+                    <MotionButton
+                      onClick={toggleSelectAllReviews}
+                      className="rounded-2xl border border-zinc-200 bg-white px-3 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                    >
+                      {selectedReviewIdsForBatchDelete.length === filteredReviewItems.length && filteredReviewItems.length ? "取消全选" : "全选当前列表"}
+                    </MotionButton>
+                    <MotionButton
+                      onClick={requestDeleteSelectedReviews}
+                      disabled={!selectedReviewIdsForBatchDelete.length}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-3 text-sm font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      删除已选 {selectedReviewIdsForBatchDelete.length ? `(${selectedReviewIdsForBatchDelete.length})` : ""}
+                    </MotionButton>
+                  </>
+                ) : null}
+                <MotionButton onClick={openReviewModal} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-3 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+                  <Plus className="h-4 w-4" />
+                  从课程新建
+                </MotionButton>
+              </StickyActionToolbar>
+            }
+          >
+            <div className="space-y-4">
+              {filteredReviewItems.length ? (
+                filteredReviewItems.map((item) => (
+                  <ReviewCard
+                    key={item.id}
+                    item={item}
+                    selected={selectedReviewId === item.id}
+                    onOpen={() => openReviewItem(item.id)}
+                    onDelete={() => requestDeleteReviewItem(item.id)}
+                    onToggleArchiveMark={() => toggleReviewArchiveMark(item.id)}
+                    selectionMode={reviewSelectionMode}
+                    checked={selectedReviewIdsForBatchDelete.includes(item.id)}
+                    onToggleSelect={() => toggleReviewBatchSelection(item.id)}
+                  />
+                ))
+              ) : (
+                <EmptyState title="还没有复习条目" description="可以新建一条复习计划，整理每周要复习的内容和资料。" />
+              )}
+            </div>
+          </SectionCard>
+        ) : null}
+
+        {!isBootstrapping && page === "reviewStatus" ? (
+          <SectionCard
+            title="复习状态"
+            subtitle="这里集中展示每个复习条目的当前复习进度。进度达到 100% 时会自动视为已复习。"
+          >
+            {reviewOverviewRows.length ? (
+              <div className="overflow-x-auto">
+                <table className="min-w-full border-separate border-spacing-y-3">
+                  <thead>
+                    <tr className="text-left text-sm text-zinc-500">
+                      <th className="px-3">复习条目</th>
+                      <th className="px-3">时间</th>
+                      <th className="px-3">复习进度</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reviewOverviewRows.map((item) => {
+                      const reviewDone = item.progress === 100;
+                      return (
+                        <tr key={item.id} className="bg-zinc-50 text-sm shadow-sm">
+                          <td className="rounded-l-3xl px-3 py-4 align-middle">
+                            <div className="font-semibold text-zinc-900">{item.name}</div>
+                            <div className="mt-1 text-xs text-zinc-500">{item.subject || "未分类"}</div>
+                          </td>
+                          <td className="px-3 py-4 align-middle text-zinc-600">
+                            <div>{getEntityScheduleLabel(item) || "时间待定"}</div>
+                          </td>
+                          <td className="rounded-r-3xl px-3 py-4 align-middle">
+                            <div className="font-medium text-zinc-900">{item.progress}%</div>
+                            <div className={classNames("mt-1 text-xs", reviewDone ? "text-emerald-700" : "text-zinc-500")}>{reviewDone ? "已复习" : "未复习"}</div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState title="还没有复习条目" description="先创建复习条目，然后在这里集中打卡。" />
+            )}
+          </SectionCard>
+        ) : null}
+
+        {!isBootstrapping && page === "reviewDetail" ? (
+          selectedReview ? (
+            <div className="space-y-6">
+              <SectionCard
+                title="复习详情"
+                subtitle="这里集中展示这条复习计划的信息、复习进度和复习文件。"
+                right={
+                  <MotionButton onClick={() => navigateToPage("reviews")} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                    <ArrowLeft className="h-4 w-4" />
+                    返回复习列表
+                  </MotionButton>
+                }
+              >
+                <div className="rounded-[2rem] border border-zinc-200 bg-zinc-50 p-6">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <div className="mb-2 inline-flex rounded-full bg-white px-3 py-1 text-xs font-medium text-zinc-600">{selectedReview.subject || "复习条目"}</div>
+                      <h2 className="text-2xl font-semibold text-zinc-950">{selectedReview.name}</h2>
+                      <p className="mt-2 text-sm text-zinc-500">
+                        {getEntityScheduleLabel(selectedReview) || "时间待定"}
+                        {selectedReview.room ? ` · ${selectedReview.room}` : ""}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {!selectedReview.archived ? (
+                        <>
+                          <MotionButton
+                            onClick={() => toggleReviewArchiveMark(selectedReview.id)}
+                            disabled={selectedReviewProgress === 100}
+                            className={classNames(
+                              "inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium",
+                              isReviewArchiveMarked(selectedReview)
+                                ? "border border-amber-200 bg-amber-50 text-amber-800"
+                                : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
+                              selectedReviewProgress === 100 ? "cursor-not-allowed opacity-70" : ""
+                            )}
+                          >
+                            <CheckCircle2 className="h-4 w-4" />
+                            {selectedReviewProgress === 100 ? "已自动标记归档" : selectedReview.archiveMarked ? "取消归档标记" : "标记归档"}
+                          </MotionButton>
+                          <MotionButton onClick={() => requestArchiveReviewItem(selectedReview.id)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                            <Archive className="h-4 w-4" />
+                            归档
+                          </MotionButton>
+                        </>
+                      ) : (
+                        <MotionButton onClick={() => restoreReviewItem(selectedReview.id)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                          <RotateCcw className="h-4 w-4" />
+                          恢复
+                        </MotionButton>
+                      )}
+                      <MotionButton onClick={() => requestDeleteReviewItem(selectedReview.id)} className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-4 py-3 text-sm font-medium text-red-600 hover:bg-red-50">
+                        <Trash2 className="h-4 w-4" />
+                        删除
+                      </MotionButton>
+                    </div>
+                  </div>
+                </div>
+              </SectionCard>
+
+              <SectionCard
+                title="复习进度"
+                subtitle="每看完一个复习文件，就可以把它标记为已复习，进度会自动增长。"
+              >
+                <div className="grid gap-4 md:grid-cols-3">
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">当前进度</div>
+                    <div className="mt-3 text-2xl font-semibold text-zinc-950">{selectedReviewProgress}%</div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">已复习文件</div>
+                    <div className="mt-3 text-2xl font-semibold text-zinc-950">{selectedReview.files.filter((file) => file.reviewed).length}</div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-medium text-zinc-500">总体状态</div>
+                    <div className={classNames("mt-3 inline-flex rounded-full px-3 py-2 text-sm font-medium", selectedReviewProgress === 100 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
+                      {selectedReviewProgress === 100 ? "已复习" : "未复习"}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-4">
+                  <ProgressBar value={selectedReviewProgress} />
+                </div>
+              </SectionCard>
+
+              <SectionCard title="最近上传" subtitle="保留最近新增到这条复习里的文件记录。">
+                {selectedReviewRecentFiles.length ? (
+                  <div className="space-y-3">
+                    {selectedReviewRecentFiles.map((file) => (
+                      <div key={file.id} className="rounded-2xl border border-zinc-200 bg-white px-4 py-3">
+                        <div className="text-sm font-medium text-zinc-900">{file.name}</div>
+                        <div className="mt-1 text-xs text-zinc-500">{file.category} · {formatDateTime(file.uploadedAt)}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-sm text-zinc-500">这条复习还没有上传过资料。</div>
+                )}
+              </SectionCard>
+
+              <SectionCard
+                title="复习文件"
+                subtitle="这些文件来自对应课程，分类保持一致。你可以逐个标记是否已经复习，也可以额外上传复习资料。"
+                right={
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={reviewUploadCategory}
+                      onChange={(e) => setReviewUploadCategory(e.target.value)}
+                      className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                    >
+                      {FILE_CATEGORIES.map((category) => (
+                        <option key={category}>{category}</option>
+                      ))}
+                    </select>
+                    <input ref={reviewFileInputRef} type="file" multiple className="hidden" onChange={handleReviewUpload} />
+                    <MotionButton
+                      onClick={() => reviewFileInputRef.current?.click()}
+                      disabled={reviewUploading}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:bg-zinc-100"
+                    >
+                      <Upload className="h-4 w-4" />
+                      {reviewUploading ? "上传中..." : "上传复习文件"}
+                    </MotionButton>
+                    <MotionButton
+                      onClick={() => syncReviewFilesFromCourse(selectedReview.id)}
+                      disabled={reviewUploading || !selectedReviewSourceCourse}
+                      className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:bg-zinc-400"
+                    >
+                      同步还原课程文件
+                    </MotionButton>
+                  </div>
+                }
+              >
+                <div className="space-y-4">
+                  <button
+                    type="button"
+                    onClick={() => reviewFileInputRef.current?.click()}
+                    onDragEnter={handleReviewFileDragEnter}
+                    onDragOver={handleReviewFileDragOver}
+                    onDragLeave={handleReviewFileDragLeave}
+                    onDrop={handleReviewFileDrop}
+                    className={classNames(
+                      "w-full rounded-3xl border-2 border-dashed px-5 py-6 text-left transition",
+                      isReviewFileDragActive ? "border-zinc-900 bg-zinc-100" : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-white"
+                    )}
+                  >
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-900">{reviewUploading ? "正在上传文件..." : "拖拽文件到这里，或点击选择文件"}</div>
+                        <div className="mt-1 text-sm text-zinc-500">会按当前分类“{reviewUploadCategory}”直接上传到这条复习里。</div>
+                      </div>
+                      <span className="rounded-full bg-white px-3 py-2 text-xs font-medium text-zinc-600 shadow-sm">支持多文件</span>
+                    </div>
+                  </button>
+                  {selectedReviewFiles.map((group) => (
+                    <ReviewFileSection
+                      key={group.category}
+                      title={group.category}
+                      files={group.items}
+                      busyFileId={reviewBusyFileId}
+                      onOpen={(file) => openStoredReviewFile(file, false)}
+                      onDownload={(file) => openStoredReviewFile(file, true)}
+                      onToggleReview={(fileId) => toggleReviewFileReviewed(selectedReview.id, fileId)}
+                    />
+                  ))}
+                </div>
+              </SectionCard>
+            </div>
+          ) : (
+            <EmptyState
+              title="没有可查看的复习条目"
+              description="这条复习可能已经被删除。"
+              action={
+                <MotionButton onClick={() => navigateToPage("reviews")} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+                  <ArrowLeft className="h-4 w-4" />
+                  返回复习列表
+                </MotionButton>
+              }
+            />
+          )
+        ) : null}
+
+        {!isBootstrapping && page === "archive" ? (
+          <SectionCard
+            title="过往课程"
+            subtitle="已归档课程会放在这里，之后也可以恢复。支持按关键词和星期筛选。"
+            right={
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative w-56">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+                  <input
+                    value={archiveQuery}
+                    onChange={(e) => setArchiveQuery(e.target.value)}
+                    placeholder="搜索过往课程"
+                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 py-3 pl-10 pr-4 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                  />
+                </div>
+                <select
+                  value={archiveWeekdayFilter}
+                  onChange={(e) => setArchiveWeekdayFilter(e.target.value)}
+                  className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                >
+                  <option>全部星期</option>
+                  {DAY_ORDER.map((day) => (
+                    <option key={day}>{day}</option>
+                  ))}
+                </select>
+              </div>
+            }
+          >
+            {filteredArchivedCourses.length ? (
+              <div className="space-y-4">
+                {filteredArchivedCourses.map((course) => (
+                  <div key={course.id} className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                      <div>
+                        <div className="text-lg font-semibold text-zinc-900">{course.name}</div>
+                        <div className="mt-1 text-sm text-zinc-500">{getEntityScheduleLabel(course) || "时间待定"} · {course.kind}</div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <MotionButton onClick={() => restoreCourse(course.id)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                          <RotateCcw className="h-4 w-4" />
+                          恢复
+                        </MotionButton>
+                        <MotionButton onClick={() => requestDeleteCourse(course.id)} className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50">
+                          <Trash2 className="h-4 w-4" />
+                          删除
+                        </MotionButton>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState title="没有匹配的过往课程" description="可以清空搜索或切换星期筛选。" />
+            )}
+          </SectionCard>
+        ) : null}
+
+        {!isBootstrapping && page === "reviewArchive" ? (
+          <SectionCard
+            title="过往复习"
+            subtitle="这里展示已经归档的复习条目。可以按关键词和星期筛选。"
+            right={
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative w-56">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+                  <input
+                    value={reviewArchiveQuery}
+                    onChange={(e) => setReviewArchiveQuery(e.target.value)}
+                    placeholder="搜索过往复习"
+                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 py-3 pl-10 pr-4 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                  />
+                </div>
+              </div>
+            }
+          >
+            {filteredArchivedReviewItems.length ? (
+              <div className="space-y-4">
+                {filteredArchivedReviewItems.map((item) => (
+                  <div key={item.id} className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                      <div>
+                        <div className="text-lg font-semibold text-zinc-900">{item.name}</div>
+                        <div className="mt-1 text-sm text-zinc-500">{getEntityScheduleLabel(item) || "时间待定"} · {item.subject || "复习条目"}</div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-emerald-100 px-3 py-2 text-xs font-medium text-emerald-700">{calcReviewProgress(item)}%</span>
+                        <MotionButton onClick={() => restoreReviewItem(item.id)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                          <RotateCcw className="h-4 w-4" />
+                          恢复
+                        </MotionButton>
+                        <MotionButton onClick={() => openReviewItem(item.id)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                          <Eye className="h-4 w-4" />
+                          查看
+                        </MotionButton>
+                        <MotionButton onClick={() => requestDeleteReviewItem(item.id)} className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50">
+                          <Trash2 className="h-4 w-4" />
+                          删除
+                        </MotionButton>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState title="还没有过往复习" description="归档后的复习条目会显示在这里。" />
+            )}
+          </SectionCard>
+        ) : null}
+      </div>
+
+      <Modal open={showCreateModal} onClose={closeCourseModal} title={editingCourseId ? "编辑课程" : "新建课程"}>
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="block">
+            <div className="mb-2 text-sm font-medium text-zinc-700">课程名称</div>
+            <input
+              value={createForm.name}
+              onChange={(e) => updateCourseForm("name", e.target.value)}
+              placeholder="例如：Maschinelles Lernen"
+              className={classNames(
+                "w-full rounded-2xl border bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:bg-white",
+                courseFormErrors.name ? "border-rose-300 focus:border-rose-400" : "border-zinc-200 focus:border-zinc-400"
+              )}
+            />
+            {courseFormErrors.name ? <div className="mt-2 text-xs font-medium text-rose-600">{courseFormErrors.name}</div> : null}
+          </label>
+          <label className="block">
+            <div className="mb-2 text-sm font-medium text-zinc-700">授课教师</div>
+            <input
+              value={createForm.teacher}
+              onChange={(e) => updateCourseForm("teacher", e.target.value)}
+              placeholder="例如：Prof. Müller"
+              className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+            />
+          </label>
+          <label className="block">
+            <div className="mb-2 text-sm font-medium text-zinc-700">课程类型</div>
+            <select
+              value={createForm.kind}
+              onChange={(e) => updateCourseForm("kind", e.target.value)}
+              className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+            >
+              <option>Vorlesung</option>
+              <option>Seminar</option>
+              <option>Übung</option>
+              <option>Kolloquium</option>
+              <option>Praktikum</option>
+            </select>
+          </label>
+          <div className="block md:col-span-2">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div className="text-sm font-medium text-zinc-700">上课安排</div>
+              <MotionButton
+                type="button"
+                onClick={addCourseScheduleEntry}
+                className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+              >
+                <Plus className="h-4 w-4" />
+                添加一条时间
+              </MotionButton>
+            </div>
+            <div className={classNames("space-y-3 rounded-2xl border bg-zinc-50 p-3", courseFormErrors.scheduleEntries ? "border-rose-300" : "border-zinc-200")}>
+              {(createForm.scheduleEntries || []).map((entry, index) => (
+                <div key={`${entry.weekday}-${index}`} className="grid gap-3 rounded-2xl border border-zinc-200 bg-white p-3 md:grid-cols-[180px_minmax(0,1fr)_auto]">
+                  <select
+                    value={entry.weekday}
+                    onChange={(e) => updateCourseScheduleEntry(index, "weekday", e.target.value)}
+                    className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                  >
+                    {DAY_ORDER.map((day) => (
+                      <option key={day} value={day}>
+                        {day}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    value={entry.time}
+                    onChange={(e) => updateCourseScheduleEntry(index, "time", e.target.value)}
+                    placeholder="xx:xx - xx:xx"
+                    inputMode="numeric"
+                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                  />
+                  <MotionButton
+                    type="button"
+                    onClick={() => removeCourseScheduleEntry(index)}
+                    disabled={(createForm.scheduleEntries || []).length <= 1}
+                    className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    删除
+                  </MotionButton>
+                </div>
+              ))}
+            </div>
+            <div className={classNames("mt-2 text-xs", courseFormErrors.scheduleEntries ? "font-medium text-rose-600" : "text-zinc-500")}>
+              {courseFormErrors.scheduleEntries || "每条上课安排都可以设置不同的星期和时间。直接输入数字即可自动补全成 xx:xx - xx:xx。"}
+            </div>
+          </div>
+          <label className="block">
+            <div className="mb-2 text-sm font-medium text-zinc-700">教室 / 地点</div>
+            <input
+              value={createForm.room}
+              onChange={(e) => updateCourseForm("room", e.target.value)}
+              placeholder="例如：S 006 · Schellingstr. 3"
+              className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+            />
+          </label>
+        </div>
+        <div className="mt-6 flex flex-wrap items-center justify-end gap-3">
+          <MotionButton onClick={closeCourseModal} className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+            取消
+          </MotionButton>
+          <MotionButton onClick={saveCourse} disabled={isSavingCourse} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400">
+            {editingCourseId ? <Pencil className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+            {isSavingCourse ? "保存中..." : editingCourseId ? "保存修改" : "创建课程"}
+          </MotionButton>
+        </div>
+      </Modal>
+      <Modal open={showReviewModal} onClose={closeReviewModal} title="从课程新建复习条目">
+        <div className="space-y-4">
+          <label className="block">
+            <div className="mb-2 text-sm font-medium text-zinc-700">选择课程</div>
+            <select
+              value={reviewForm.sourceCourseId}
+              onChange={(e) => updateReviewForm("sourceCourseId", e.target.value)}
+              className={classNames(
+                "w-full rounded-2xl border bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:bg-white",
+                reviewFormErrors.sourceCourseId ? "border-rose-300 focus:border-rose-400" : "border-zinc-200 focus:border-zinc-400"
+              )}
+            >
+              <option value="">请选择一门课程</option>
+              {availableReviewCourses.map((course) => (
+                <option key={course.id} value={course.id}>
+                  {course.name} · {getEntityScheduleLabel(course) || "时间待定"}
+                </option>
+              ))}
+            </select>
+            {reviewFormErrors.sourceCourseId ? <div className="mt-2 text-xs font-medium text-rose-600">{reviewFormErrors.sourceCourseId}</div> : null}
+          </label>
+          <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-sm leading-6 text-zinc-600">
+            新建后会自动复制这门课当前的所有课程文件到复习条目里，并保留原有分类。之后你可以在复习详情里逐个文件标记“已复习 / 未复习”。
+          </div>
+        </div>
+        <div className="mt-6 flex flex-wrap items-center justify-end gap-3">
+          <MotionButton onClick={closeReviewModal} className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+            取消
+          </MotionButton>
+          <MotionButton onClick={saveReviewItem} disabled={isSavingReview} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400">
+            <Plus className="h-4 w-4" />
+            {isSavingReview ? "创建中..." : "创建复习条目"}
+          </MotionButton>
+        </div>
+      </Modal>
+      <Modal open={Boolean(confirmState)} onClose={() => setConfirmState(null)} title={confirmState?.title || "确认操作"}>
+        <div className="space-y-5">
+          <p className="text-sm leading-6 text-zinc-600">{confirmState?.description}</p>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <MotionButton onClick={() => setConfirmState(null)} className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+              取消
+            </MotionButton>
+            <MotionButton onClick={handleConfirmAction} className="rounded-2xl bg-red-600 px-4 py-3 text-sm font-medium text-white hover:bg-red-500">
+              {confirmState?.confirmLabel || "确认删除"}
+            </MotionButton>
+          </div>
+        </div>
+      </Modal>
+      <Modal open={Boolean(unsavedPromptState)} onClose={() => setUnsavedPromptState(null)} title={unsavedPromptState?.title || "有未保存修改"}>
+        <div className="space-y-5">
+          <p className="text-sm leading-6 text-zinc-600">{unsavedPromptState?.description}</p>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <MotionButton onClick={() => setUnsavedPromptState(null)} className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+              取消
+            </MotionButton>
+            <MotionButton onClick={handleUnsavedPromptDiscard} className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+              不保存
+            </MotionButton>
+            <MotionButton onClick={handleUnsavedPromptSave} className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+              保存并继续
+            </MotionButton>
+          </div>
+        </div>
+      </Modal>
+      <AnimatePresence>
+        {toastMessage ? (
+          <motion.div
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12 }}
+            transition={{ duration: 0.18 }}
+            className="fixed right-6 top-6 z-[60] rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800 shadow-lg"
+          >
+            {toastMessage}
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      <button
+        onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+        className="fixed bottom-6 right-6 rounded-full bg-zinc-900 p-3 text-white shadow-lg hover:bg-zinc-800"
+        title="回到顶部"
+      >
+        ↑
+      </button>
+    </div>
+  );
+}
+
