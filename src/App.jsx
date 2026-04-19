@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   BookOpen,
   CalendarDays,
+  ChevronDown,
   CheckCircle2,
   ClipboardList,
   Download,
@@ -191,6 +192,12 @@ function formatBytes(bytes = 0) {
   const sizes = ["B", "KB", "MB", "GB"];
   const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), sizes.length - 1);
   return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${sizes[i]}`;
+}
+
+function getStoragePublicUrl(storagePath = "") {
+  if (!storagePath || !isSupabaseConfigured || !supabase) return "";
+  const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath);
+  return data?.publicUrl || "";
 }
 
 function formatTimeRangeInput(value = "") {
@@ -483,14 +490,6 @@ function calcReviewProgress(reviewItem) {
   if (!total) return 0;
   const done = reviewItem.files.filter((file) => file.reviewed).length;
   return Math.round((done / total) * 100);
-}
-
-function isCourseArchiveMarked(course) {
-  return Boolean(course.archiveMarked) || calcCourseProgress(course) === 100;
-}
-
-function isReviewArchiveMarked(reviewItem) {
-  return Boolean(reviewItem.archiveMarked) || calcReviewProgress(reviewItem) === 100;
 }
 
 function groupFiles(files = []) {
@@ -857,7 +856,7 @@ function MotionButton({ className = "", children, ...props }) {
   );
 }
 
-function Modal({ open, title, onClose, children }) {
+function Modal({ open, title, onClose, children, panelClassName = "", bodyClassName = "" }) {
   return (
     <AnimatePresence>
       {open ? (
@@ -873,7 +872,7 @@ function Modal({ open, title, onClose, children }) {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 12, opacity: 0 }}
             transition={{ duration: 0.18 }}
-            className="w-full max-w-2xl rounded-3xl bg-white p-6 shadow-2xl"
+            className={classNames("w-full max-w-2xl rounded-3xl bg-white p-6 shadow-2xl", panelClassName)}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-5 flex items-center justify-between gap-3">
@@ -885,7 +884,7 @@ function Modal({ open, title, onClose, children }) {
                 <X className="h-5 w-5" />
               </MotionButton>
             </div>
-            {children}
+            <div className={classNames("max-h-[75vh] overflow-y-auto pr-1", bodyClassName)}>{children}</div>
           </motion.div>
         </motion.div>
       ) : null}
@@ -901,22 +900,28 @@ function ProgressBar({ value }) {
   );
 }
 
-function StatCard({ icon, label, value, helper }) {
+function StatCard({ icon, label, value, helper, onClick }) {
   return (
-    <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+    <MotionButton
+      onClick={onClick}
+      className={classNames(
+        "w-full rounded-3xl border border-zinc-200 bg-white p-4 text-left shadow-sm transition sm:p-5",
+        onClick ? "hover:border-zinc-300 hover:bg-zinc-50" : "cursor-default"
+      )}
+    >
       <div className="mb-3 flex items-center gap-3 text-zinc-500">
         <div className="rounded-2xl bg-zinc-100 p-2">{icon}</div>
         <span className="text-sm font-medium">{label}</span>
       </div>
       <div className="text-2xl font-semibold text-zinc-900">{value}</div>
       <div className="mt-1 text-sm text-zinc-500">{helper}</div>
-    </div>
+    </MotionButton>
   );
 }
 
 function SectionCard({ title, subtitle, right, children, stickyHeader = false }) {
   return (
-    <section className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+    <section className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm sm:p-5">
       <div
         className={classNames(
           "mb-4 flex flex-wrap items-start justify-between gap-3",
@@ -952,7 +957,7 @@ function NavTab({ active, icon, label, onClick }) {
     <MotionButton
       onClick={onClick}
       className={classNames(
-        "inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition",
+        "inline-flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition sm:w-auto",
         active ? "bg-zinc-900 text-white" : "bg-white text-zinc-700 ring-1 ring-zinc-200 hover:bg-zinc-50"
       )}
     >
@@ -976,26 +981,26 @@ function StatusPill({ done, doneLabel, todoLabel, onClick }) {
   );
 }
 
-function CourseCard({ course, currentWeekNumber, selected, onOpen, onEdit, onDelete, onArchive, onToggleArchiveMark, selectionMode, checked, onToggleSelect }) {
+function CourseCard({ course, currentWeekNumber, selected, onOpen, onEdit, onDelete, onArchive, bulkMode, checked, onToggleSelect }) {
   const currentRecord = findWeeklyRecord(course, currentWeekNumber);
   const progress = calcCourseProgress(course);
   const scheduleLabel = getEntityScheduleLabel(course);
-  const autoArchiveMarked = progress === 100;
-  const archiveMarked = Boolean(course.archiveMarked) || autoArchiveMarked;
+  const primaryAction = bulkMode ? onToggleSelect : onOpen;
+
   return (
-    <div className={classNames("rounded-3xl border bg-white p-4 shadow-sm transition", selected ? "border-zinc-900" : "border-zinc-200") }>
-      <div className="flex items-start justify-between gap-3">
-        <button onClick={onOpen} className="min-w-0 flex-1 text-left">
+    <div className={classNames("rounded-3xl border bg-white p-4 shadow-sm transition", selected ? "border-zinc-900" : "border-zinc-200")}>
+      <div className="flex flex-col gap-4">
+        <button onClick={primaryAction} className="min-w-0 text-left">
           <div className="truncate text-xl font-semibold text-zinc-900">{course.name}</div>
           <div className="mt-1 text-sm text-zinc-500">{scheduleLabel || "时间待定"}</div>
           <div className="mt-1 text-xs text-zinc-500">{course.kind}{course.room ? ` · ${course.room}` : ""}</div>
         </button>
-        <div className="flex items-center gap-2">
-          {selectionMode ? (
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+          {bulkMode ? (
             <MotionButton
               onClick={onToggleSelect}
               className={classNames(
-                "inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium",
+                "col-span-2 inline-flex items-center justify-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium sm:col-span-1",
                 checked ? "border border-zinc-900 bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
               )}
             >
@@ -1003,48 +1008,26 @@ function CourseCard({ course, currentWeekNumber, selected, onOpen, onEdit, onDel
               {checked ? "已选中" : "选择"}
             </MotionButton>
           ) : null}
-          <MotionButton
-            onClick={onOpen}
-            className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-          >
-            <Eye className="h-4 w-4" />
-            查看
-          </MotionButton>
-          <MotionButton
-            onClick={onEdit}
-            className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-          >
-            <Pencil className="h-4 w-4" />
-            编辑
-          </MotionButton>
-          <MotionButton
-            onClick={onToggleArchiveMark}
-            disabled={autoArchiveMarked}
-            className={classNames(
-              "inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium",
-              archiveMarked
-                ? "border border-amber-200 bg-amber-50 text-amber-800"
-                : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
-              autoArchiveMarked ? "cursor-not-allowed opacity-70" : ""
-            )}
-          >
-            <CheckCircle2 className="h-4 w-4" />
-            {autoArchiveMarked ? "已自动标记" : archiveMarked ? "取消归档标记" : "标记归档"}
-          </MotionButton>
-          <MotionButton
-            onClick={onArchive}
-            className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-          >
-            <Archive className="h-4 w-4" />
-            归档
-          </MotionButton>
-          <MotionButton
-            onClick={onDelete}
-            className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
-          >
-            <Trash2 className="h-4 w-4" />
-            删除
-          </MotionButton>
+          {!bulkMode ? (
+            <>
+              <MotionButton onClick={onOpen} className="inline-flex items-center justify-center gap-2 rounded-2xl bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800">
+                <Eye className="h-4 w-4" />
+                查看
+              </MotionButton>
+              <MotionButton onClick={onEdit} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                <Pencil className="h-4 w-4" />
+                编辑
+              </MotionButton>
+              <MotionButton onClick={onArchive} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                <Archive className="h-4 w-4" />
+                归档
+              </MotionButton>
+              <MotionButton onClick={onDelete} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50">
+                <Trash2 className="h-4 w-4" />
+                删除
+              </MotionButton>
+            </>
+          ) : null}
         </div>
       </div>
       <div className="mt-4">
@@ -1055,11 +1038,6 @@ function CourseCard({ course, currentWeekNumber, selected, onOpen, onEdit, onDel
         <ProgressBar value={progress} />
       </div>
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        {archiveMarked ? (
-          <span className="rounded-full bg-amber-100 px-3 py-2 text-xs font-medium text-amber-800">
-            {autoArchiveMarked ? "进度 100%，已自动标记归档" : "已标记归档"}
-          </span>
-        ) : null}
         <span className={classNames("rounded-full px-3 py-2 text-xs font-medium", currentRecord?.lectureDone ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700")}>
           {currentRecord?.lectureDone ? "本周已上课" : "本周未上课"}
         </span>
@@ -1071,23 +1049,82 @@ function CourseCard({ course, currentWeekNumber, selected, onOpen, onEdit, onDel
   );
 }
 
-function StickyActionToolbar({ children }) {
+function ToolbarRow({ children }) {
   return (
-    <div className="-mx-1 rounded-2xl bg-white/95 p-1">
-      <div className="flex flex-wrap items-center gap-2">{children}</div>
+    <div className="-mx-1 rounded-2xl p-1">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">{children}</div>
     </div>
   );
 }
 
-function ReviewCard({ item, selected, onOpen, onDelete, onToggleArchiveMark, selectionMode, checked, onToggleSelect }) {
+function BulkActionBar({ mode, count, totalCount, onToggleAll, onSubmit, onCancel }) {
+  const isDelete = mode === "delete";
+
+  return (
+    <div className="sticky top-28 z-30 mb-4 rounded-2xl border border-zinc-200 bg-white/95 p-3 shadow-sm backdrop-blur">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+        <span className="rounded-full bg-zinc-100 px-3 py-2 text-xs font-medium text-zinc-700">
+          {isDelete ? "批量删除模式" : "批量归档模式"}
+        </span>
+        <span className="text-sm text-zinc-500">已选 {count} 项</span>
+        <MotionButton
+          onClick={onToggleAll}
+          className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+        >
+          {count === totalCount && totalCount ? "取消全选" : "全选当前列表"}
+        </MotionButton>
+        <MotionButton
+          onClick={onSubmit}
+          disabled={!count}
+          className={classNames(
+            "inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50",
+            isDelete ? "border border-red-200 bg-white text-red-600 hover:bg-red-50" : "bg-zinc-900 text-white hover:bg-zinc-800"
+          )}
+        >
+          {isDelete ? <Trash2 className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
+          {isDelete ? "删除已选" : "归档已选"} {count ? `(${count})` : ""}
+        </MotionButton>
+        <MotionButton
+          onClick={onCancel}
+          className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+        >
+          <X className="h-4 w-4" />
+          取消
+        </MotionButton>
+      </div>
+    </div>
+  );
+}
+
+function DetailModuleCard({ icon, title, description, meta, onClick }) {
+  return (
+    <MotionButton
+      onClick={onClick}
+      className="w-full rounded-3xl border border-zinc-200 bg-white p-4 text-left shadow-sm transition hover:border-zinc-300 hover:bg-zinc-50 sm:p-5"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="rounded-2xl bg-zinc-100 p-3 text-zinc-700">{icon}</div>
+        {meta ? <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-600">{meta}</span> : null}
+      </div>
+      <div className="mt-4 text-base font-semibold text-zinc-900 sm:text-lg">{title}</div>
+      <div className="mt-1 text-sm leading-6 text-zinc-500">{description}</div>
+      <div className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-zinc-700">
+        点击查看
+        <ChevronDown className="h-4 w-4 -rotate-90" />
+      </div>
+    </MotionButton>
+  );
+}
+
+function ReviewCard({ item, selected, onOpen, onDelete, onArchive, bulkMode, checked, onToggleSelect }) {
   const progress = calcReviewProgress(item);
   const scheduleLabel = getEntityScheduleLabel(item);
-  const autoArchiveMarked = progress === 100;
-  const archiveMarked = Boolean(item.archiveMarked) || autoArchiveMarked;
+  const primaryAction = bulkMode ? onToggleSelect : onOpen;
+
   return (
     <div className={classNames("rounded-3xl border bg-white p-4 shadow-sm transition", selected ? "border-zinc-900" : "border-zinc-200")}>
-      <div className="flex items-start justify-between gap-3">
-        <button onClick={onOpen} className="min-w-0 flex-1 text-left">
+      <div className="flex flex-col gap-4">
+        <button onClick={primaryAction} className="min-w-0 text-left">
           <div className="truncate text-xl font-semibold text-zinc-900">{item.name}</div>
           <div className="mt-1 text-sm text-zinc-500">{scheduleLabel || "时间待定"}</div>
           <div className="mt-1 text-xs text-zinc-500">
@@ -1095,12 +1132,12 @@ function ReviewCard({ item, selected, onOpen, onDelete, onToggleArchiveMark, sel
             {item.room ? ` · ${item.room}` : ""}
           </div>
         </button>
-        <div className="flex items-center gap-2">
-          {selectionMode ? (
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+          {bulkMode ? (
             <MotionButton
               onClick={onToggleSelect}
               className={classNames(
-                "inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium",
+                "col-span-2 inline-flex items-center justify-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium sm:col-span-1",
                 checked ? "border border-zinc-900 bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
               )}
             >
@@ -1108,34 +1145,22 @@ function ReviewCard({ item, selected, onOpen, onDelete, onToggleArchiveMark, sel
               {checked ? "已选中" : "选择"}
             </MotionButton>
           ) : null}
-          <MotionButton
-            onClick={onOpen}
-            className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-          >
-            <Eye className="h-4 w-4" />
-            查看
-          </MotionButton>
-          <MotionButton
-            onClick={onToggleArchiveMark}
-            disabled={autoArchiveMarked}
-            className={classNames(
-              "inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium",
-              archiveMarked
-                ? "border border-amber-200 bg-amber-50 text-amber-800"
-                : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
-              autoArchiveMarked ? "cursor-not-allowed opacity-70" : ""
-            )}
-          >
-            <CheckCircle2 className="h-4 w-4" />
-            {autoArchiveMarked ? "已自动标记" : archiveMarked ? "取消归档标记" : "标记归档"}
-          </MotionButton>
-          <MotionButton
-            onClick={onDelete}
-            className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
-          >
-            <Trash2 className="h-4 w-4" />
-            删除
-          </MotionButton>
+          {!bulkMode ? (
+            <>
+              <MotionButton onClick={onOpen} className="inline-flex items-center justify-center gap-2 rounded-2xl bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800">
+                <Eye className="h-4 w-4" />
+                查看
+              </MotionButton>
+              <MotionButton onClick={onArchive} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                <Archive className="h-4 w-4" />
+                归档
+              </MotionButton>
+              <MotionButton onClick={onDelete} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50">
+                <Trash2 className="h-4 w-4" />
+                删除
+              </MotionButton>
+            </>
+          ) : null}
         </div>
       </div>
       <div className="mt-4">
@@ -1146,11 +1171,6 @@ function ReviewCard({ item, selected, onOpen, onDelete, onToggleArchiveMark, sel
         <ProgressBar value={progress} />
       </div>
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        {archiveMarked ? (
-          <span className="rounded-full bg-amber-100 px-3 py-2 text-xs font-medium text-amber-800">
-            {autoArchiveMarked ? "进度 100%，已自动标记归档" : "已标记归档"}
-          </span>
-        ) : null}
         <span className={classNames("rounded-full px-3 py-2 text-xs font-medium", progress === 100 ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700")}>
           {progress === 100 ? "已复习完成" : "未复习完成"}
         </span>
@@ -1159,14 +1179,24 @@ function ReviewCard({ item, selected, onOpen, onDelete, onToggleArchiveMark, sel
   );
 }
 
-function FileSection({ title, files, busyFileId, onOpen, onDownload, onDelete }) {
+function FileSection({ title, files, busyFileId, onOpen, onDownload, onDelete, collapsed = false, onToggleCollapse }) {
   return (
     <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h4 className="text-base font-semibold text-zinc-900">{title}</h4>
-        <span className="rounded-full bg-white px-3 py-1 text-xs text-zinc-500">{files.length} 个文件</span>
+        <button type="button" onClick={onToggleCollapse} className="flex items-center gap-2 text-left">
+          <h4 className="text-base font-semibold text-zinc-900">{title}</h4>
+          <span className="rounded-full bg-white px-3 py-1 text-xs text-zinc-500">{files.length} 个文件</span>
+        </button>
+        <MotionButton
+          onClick={onToggleCollapse}
+          className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-100"
+        >
+          {collapsed ? "展开" : "收起"}
+        </MotionButton>
       </div>
-      {files.length ? (
+      {collapsed ? (
+        <div className="text-sm text-zinc-500">已收起，点击展开查看文件。</div>
+      ) : files.length ? (
         <div className="space-y-3">
           {files.map((file) => (
             <div key={file.id} className="rounded-2xl border border-zinc-200 bg-white p-4">
@@ -1269,12 +1299,28 @@ function ReviewFileSection({ title, files, busyFileId, onOpen, onDownload, onTog
   );
 }
 
+function FileCoverThumbnail({ file, className = "" }) {
+  const isImage = (file?.mime || "").startsWith("image/");
+  const imageUrl = isImage ? getStoragePublicUrl(file?.storagePath || "") : "";
+
+  if (imageUrl) {
+    return <img src={imageUrl} alt={file?.name || "文件封面"} className={classNames("h-20 w-16 rounded-2xl border border-zinc-200 object-cover", className)} />;
+  }
+
+  return (
+    <div className={classNames("flex h-20 w-16 flex-col justify-between rounded-2xl border border-zinc-200 bg-zinc-100 p-2", className)}>
+      <FileText className="h-4 w-4 text-zinc-500" />
+      <div className="text-[10px] font-medium leading-4 text-zinc-600">{file?.category || "文件"}</div>
+    </div>
+  );
+}
+
 function StatusActionBar({ hasUnsavedStatusChanges, changedCount, onDiscard, onSave, sticky = false }) {
   return (
     <div
       className={classNames(
-        "flex flex-wrap items-center gap-2",
-        sticky ? "sticky top-28 z-30 rounded-2xl border border-amber-200 bg-white/95 p-2 shadow-sm backdrop-blur" : ""
+        "flex flex-col items-stretch gap-2 sm:flex-row sm:flex-wrap sm:items-center",
+        sticky ? "sticky top-28 z-30 rounded-2xl border border-amber-200 bg-white/95 p-2 shadow-sm backdrop-blur" : "",
       )}
     >
       {hasUnsavedStatusChanges ? <span className="rounded-full bg-amber-100 px-3 py-2 text-xs font-medium text-amber-700">已改 {changedCount} 项</span> : null}
@@ -1305,13 +1351,17 @@ export default function SemesterStudyHub() {
   const [reviewQuery, setReviewQuery] = useState("");
   const [archiveQuery, setArchiveQuery] = useState("");
   const [reviewArchiveQuery, setReviewArchiveQuery] = useState("");
-  const [courseSelectionMode, setCourseSelectionMode] = useState(false);
-  const [reviewSelectionMode, setReviewSelectionMode] = useState(false);
+  const [courseBulkMode, setCourseBulkMode] = useState(null);
+  const [reviewBulkMode, setReviewBulkMode] = useState(null);
   const [selectedCourseIdsForBatchDelete, setSelectedCourseIdsForBatchDelete] = useState([]);
   const [selectedReviewIdsForBatchDelete, setSelectedReviewIdsForBatchDelete] = useState([]);
   const [page, setPage] = useState("overview");
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
+  const [showCourseSearchModal, setShowCourseSearchModal] = useState(false);
+  const [showReviewSearchModal, setShowReviewSearchModal] = useState(false);
+  const [activeCourseDetailPanel, setActiveCourseDetailPanel] = useState(null);
+  const [activeReviewDetailPanel, setActiveReviewDetailPanel] = useState(null);
   const [editingCourseId, setEditingCourseId] = useState(null);
   const [editingReviewId, setEditingReviewId] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
@@ -1336,6 +1386,7 @@ export default function SemesterStudyHub() {
   const [isReviewFileDragActive, setIsReviewFileDragActive] = useState(false);
   const [busyFileId, setBusyFileId] = useState(null);
   const [reviewBusyFileId, setReviewBusyFileId] = useState(null);
+  const [collapsedCourseFileGroups, setCollapsedCourseFileGroups] = useState({});
   const [createForm, setCreateForm] = useState(EMPTY_COURSE_FORM);
   const [reviewForm, setReviewForm] = useState(EMPTY_REVIEW_FORM);
   const [courseFormErrors, setCourseFormErrors] = useState({});
@@ -1349,8 +1400,18 @@ export default function SemesterStudyHub() {
   const reviewFileDragDepthRef = useRef(0);
   const bootstrapStartedRef = useRef(false);
   const legacyFileMigrationStartedRef = useRef(false);
+  const didInitHistoryRef = useRef(false);
+  const suppressHistoryPushRef = useRef(false);
   const currentWeekNumber = useMemo(() => getCurrentWeekNumber(new Date(currentDateTick)), [currentDateTick]);
   const currentWeekLabel = TERM_WEEKS[currentWeekNumber - 1]?.label || "";
+  const historyState = useMemo(
+    () => ({
+      page,
+      selectedCourseId: page === "courseDetail" ? selectedCourseId : null,
+      selectedReviewId: page === "reviewDetail" ? selectedReviewId : null,
+    }),
+    [page, selectedCourseId, selectedReviewId]
+  );
 
   useEffect(() => {
     if (bootstrapStartedRef.current) return undefined;
@@ -1598,6 +1659,19 @@ export default function SemesterStudyHub() {
   }, [reviews]);
 
   useEffect(() => {
+    if (page !== "courseDetail") {
+      setActiveCourseDetailPanel(null);
+    }
+    if (page !== "reviewDetail") {
+      setActiveReviewDetailPanel(null);
+    }
+  }, [page, selectedCourseId, selectedReviewId]);
+
+  useEffect(() => {
+    setCollapsedCourseFileGroups({});
+  }, [selectedCourseId]);
+
+  useEffect(() => {
     if (legacyFileMigrationStartedRef.current || isBootstrapping) return undefined;
     legacyFileMigrationStartedRef.current = true;
 
@@ -1738,6 +1812,43 @@ export default function SemesterStudyHub() {
     const timer = window.setTimeout(() => setCurrentDateTick(Date.now()), getMillisecondsUntilNextDay(new Date()));
     return () => window.clearTimeout(timer);
   }, [currentDateTick]);
+
+  useEffect(() => {
+    const handlePopState = (event) => {
+      const nextState = event.state;
+      suppressHistoryPushRef.current = true;
+      setPage(nextState?.page || "overview");
+      setSelectedCourseId(nextState?.selectedCourseId ?? null);
+      setSelectedReviewId(nextState?.selectedReviewId ?? null);
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!didInitHistoryRef.current) {
+      window.history.replaceState(historyState, "");
+      didInitHistoryRef.current = true;
+      return;
+    }
+
+    if (suppressHistoryPushRef.current) {
+      suppressHistoryPushRef.current = false;
+      return;
+    }
+
+    const currentState = window.history.state;
+    if (
+      currentState?.page === historyState.page &&
+      currentState?.selectedCourseId === historyState.selectedCourseId &&
+      currentState?.selectedReviewId === historyState.selectedReviewId
+    ) {
+      return;
+    }
+
+    window.history.pushState(historyState, "");
+  }, [historyState]);
 
   const hasUnsavedCourseStatusChanges = useMemo(() => Object.keys(statusDrafts).length > 0, [statusDrafts]);
   const statusDraftSummary = useMemo(() => {
@@ -1926,11 +2037,10 @@ export default function SemesterStudyHub() {
   );
   const selectedCourseRecentFiles = useMemo(
     () =>
-      [...(selectedCourse?.files || [])]
-        .sort((a, b) => new Date(b.uploadedAt || 0).getTime() - new Date(a.uploadedAt || 0).getTime())
-        .slice(0, 3),
+      [...(selectedCourse?.files || [])].sort((a, b) => new Date(b.uploadedAt || 0).getTime() - new Date(a.uploadedAt || 0).getTime()),
     [selectedCourse]
   );
+  const latestSelectedCourseFile = selectedCourseRecentFiles[0] || null;
   const selectedReviewRecentFiles = useMemo(
     () =>
       [...(selectedReview?.files || [])]
@@ -1946,6 +2056,239 @@ export default function SemesterStudyHub() {
     return todoItems;
   }, [selectedCourseCurrentRecord]);
   const selectedReviewTodoItems = useMemo(() => (selectedReviewProgress === 100 ? [] : ["复习文件"]), [selectedReviewProgress]);
+  const courseInfoContent = selectedCourse ? (
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+        <div className="text-xs font-medium text-zinc-500">课程名称</div>
+        <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.name || "未填写"}</div>
+      </div>
+      <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+        <div className="text-xs font-medium text-zinc-500">授课教师</div>
+        <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.teacher || "未填写"}</div>
+      </div>
+      <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+        <div className="text-xs font-medium text-zinc-500">课程类型</div>
+        <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.kind || "未填写"}</div>
+      </div>
+      <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+        <div className="text-xs font-medium text-zinc-500">星期</div>
+        <div className="mt-2 text-sm font-medium text-zinc-900">{getScheduleWeekdays(getEntityScheduleEntries(selectedCourse)).join(" / ") || "未填写"}</div>
+      </div>
+      <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+        <div className="text-xs font-medium text-zinc-500">上课时间</div>
+        <div className="mt-2 text-sm font-medium text-zinc-900">{getEntityScheduleLabel(selectedCourse) || "未填写"}</div>
+      </div>
+      <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+        <div className="text-xs font-medium text-zinc-500">教室 / 地点</div>
+        <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.room || "未填写"}</div>
+      </div>
+    </div>
+  ) : null;
+  const courseFilesContent = selectedCourse ? (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={uploadCategory}
+          onChange={(e) => setUploadCategory(e.target.value)}
+          className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+        >
+          {FILE_CATEGORIES.map((category) => (
+            <option key={category}>{category}</option>
+          ))}
+        </select>
+        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUpload} />
+        <MotionButton
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+        >
+          <Upload className="h-4 w-4" />
+          {uploading ? "上传中..." : `上传到${uploadCategory}`}
+        </MotionButton>
+      </div>
+      <button
+        type="button"
+        onClick={() => fileInputRef.current?.click()}
+        onDragEnter={handleFileDragEnter}
+        onDragOver={handleFileDragOver}
+        onDragLeave={handleFileDragLeave}
+        onDrop={handleFileDrop}
+        className={classNames(
+          "w-full rounded-3xl border-2 border-dashed px-5 py-6 text-left transition",
+          isFileDragActive ? "border-zinc-900 bg-zinc-100" : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-white"
+        )}
+      >
+        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="text-sm font-semibold text-zinc-900">{uploading ? "正在上传文件..." : "拖拽文件到这里，或点击选择文件"}</div>
+            <div className="mt-1 text-sm text-zinc-500">会按当前分类“{uploadCategory}”直接上传到这门课里。</div>
+          </div>
+          <span className="rounded-full bg-white px-3 py-2 text-xs font-medium text-zinc-600 shadow-sm">支持多文件</span>
+        </div>
+      </button>
+      {selectedCourseFiles.length ? (
+        selectedCourseFiles.map((group) => (
+          <FileSection
+            key={group.category}
+            title={group.category}
+            files={group.items}
+            busyFileId={busyFileId}
+            onOpen={(file) => openStoredFile(file, false)}
+            onDownload={(file) => openStoredFile(file, true)}
+            onDelete={(fileId) => requestRemoveFile(selectedCourse.id, fileId)}
+            collapsed={collapsedCourseFileGroups[group.category] ?? true}
+            onToggleCollapse={() => toggleCourseFileGroupCollapse(group.category)}
+          />
+        ))
+      ) : (
+        <div className="rounded-3xl border border-dashed border-zinc-300 bg-zinc-50 p-6 text-sm text-zinc-500">这门课还没有上传文件。</div>
+      )}
+    </div>
+  ) : null;
+  const courseWeeklyRecordsContent = selectedCourse ? (
+    <div className="overflow-x-auto">
+      <table className="min-w-full border-separate border-spacing-y-2">
+        <thead>
+          <tr className="text-left text-sm text-zinc-500">
+            <th className="px-3">周次</th>
+            <th className="px-3">上课</th>
+            <th className="px-3">作业</th>
+          </tr>
+        </thead>
+        <tbody>
+          {selectedCourse.weeklyRecords.map((record) => {
+            const isCurrentWeek = record.weekNumber === currentWeekNumber;
+            return (
+              <tr key={record.id} className={classNames("bg-zinc-50 text-sm shadow-sm", isCurrentWeek ? "ring-1 ring-zinc-300" : "")}>
+                <td className="rounded-l-3xl px-3 py-3 align-middle">
+                  <div className="font-medium text-zinc-900">{record.label}</div>
+                  {isCurrentWeek ? <div className="mt-1 text-xs text-zinc-500">当前周</div> : null}
+                </td>
+                <td className="px-3 py-3 align-middle">
+                  <StatusPill done={record.lectureDone} doneLabel="已上" todoLabel="未上" onClick={() => toggleWeeklyField(selectedCourse.id, record.weekNumber, "lectureDone")} />
+                </td>
+                <td className="rounded-r-3xl px-3 py-3 align-middle">
+                  <StatusPill done={record.homeworkDone} doneLabel="已写" todoLabel="未写" onClick={() => toggleWeeklyField(selectedCourse.id, record.weekNumber, "homeworkDone")} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  ) : null;
+  const reviewProgressContent = selectedReview ? (
+    <div>
+      <div className="grid gap-4 md:grid-cols-3">
+        <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+          <div className="text-xs font-medium text-zinc-500">当前进度</div>
+          <div className="mt-3 text-2xl font-semibold text-zinc-950">{selectedReviewProgress}%</div>
+        </div>
+        <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+          <div className="text-xs font-medium text-zinc-500">已复习文件</div>
+          <div className="mt-3 text-2xl font-semibold text-zinc-950">{selectedReview.files.filter((file) => file.reviewed).length}</div>
+        </div>
+        <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+          <div className="text-xs font-medium text-zinc-500">总体状态</div>
+          <div className={classNames("mt-3 inline-flex rounded-full px-3 py-2 text-sm font-medium", selectedReviewProgress === 100 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
+            {selectedReviewProgress === 100 ? "已复习" : "未复习"}
+          </div>
+        </div>
+      </div>
+      <div className="mt-4">
+        <ProgressBar value={selectedReviewProgress} />
+      </div>
+      {selectedReviewTodoItems.length ? (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {selectedReviewTodoItems.map((item) => (
+            <span key={item} className="rounded-full bg-amber-100 px-3 py-2 text-xs font-medium text-amber-700">
+              待处理：{item}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  ) : null;
+  const reviewRecentFilesContent = selectedReview ? (
+    selectedReviewRecentFiles.length ? (
+      <div className="space-y-3">
+        {selectedReviewRecentFiles.map((file) => (
+          <div key={file.id} className="rounded-2xl border border-zinc-200 bg-white px-4 py-3">
+            <div className="text-sm font-medium text-zinc-900">{file.name}</div>
+            <div className="mt-1 text-xs text-zinc-500">{file.category} · {formatDateTime(file.uploadedAt)}</div>
+          </div>
+        ))}
+      </div>
+    ) : (
+      <div className="text-sm text-zinc-500">这条复习还没有上传过资料。</div>
+    )
+  ) : null;
+  const reviewFilesContent = selectedReview ? (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={reviewUploadCategory}
+          onChange={(e) => setReviewUploadCategory(e.target.value)}
+          className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+        >
+          {FILE_CATEGORIES.map((category) => (
+            <option key={category}>{category}</option>
+          ))}
+        </select>
+        <input ref={reviewFileInputRef} type="file" multiple className="hidden" onChange={handleReviewUpload} />
+        <MotionButton
+          onClick={() => reviewFileInputRef.current?.click()}
+          disabled={reviewUploading}
+          className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:bg-zinc-100"
+        >
+          <Upload className="h-4 w-4" />
+          {reviewUploading ? "上传中..." : "上传复习文件"}
+        </MotionButton>
+        <MotionButton
+          onClick={() => syncReviewFilesFromCourse(selectedReview.id)}
+          disabled={reviewUploading || !selectedReviewSourceCourse}
+          className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:bg-zinc-400"
+        >
+          同步还原课程文件
+        </MotionButton>
+      </div>
+      <button
+        type="button"
+        onClick={() => reviewFileInputRef.current?.click()}
+        onDragEnter={handleReviewFileDragEnter}
+        onDragOver={handleReviewFileDragOver}
+        onDragLeave={handleReviewFileDragLeave}
+        onDrop={handleReviewFileDrop}
+        className={classNames(
+          "w-full rounded-3xl border-2 border-dashed px-5 py-6 text-left transition",
+          isReviewFileDragActive ? "border-zinc-900 bg-zinc-100" : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-white"
+        )}
+      >
+        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="text-sm font-semibold text-zinc-900">{reviewUploading ? "正在上传文件..." : "拖拽文件到这里，或点击选择文件"}</div>
+            <div className="mt-1 text-sm text-zinc-500">会按当前分类“{reviewUploadCategory}”直接上传到这条复习里。</div>
+          </div>
+          <span className="rounded-full bg-white px-3 py-2 text-xs font-medium text-zinc-600 shadow-sm">支持多文件</span>
+        </div>
+      </button>
+      {selectedReviewFiles.length ? (
+        selectedReviewFiles.map((group) => (
+          <ReviewFileSection
+            key={group.category}
+            title={group.category}
+            files={group.items}
+            busyFileId={reviewBusyFileId}
+            onOpen={(file) => openStoredReviewFile(file, false)}
+            onDownload={(file) => openStoredReviewFile(file, true)}
+            onToggleReview={(fileId) => toggleReviewFileReviewed(selectedReview.id, fileId)}
+          />
+        ))
+      ) : (
+        <div className="rounded-3xl border border-dashed border-zinc-300 bg-zinc-50 p-6 text-sm text-zinc-500">这条复习还没有文件。</div>
+      )}
+    </div>
+  ) : null;
 
   const weeklyOverviewRows = useMemo(
     () => activeCourses.map((course) => ({ ...course, currentRecord: findWeeklyRecord(course, currentWeekNumber) })),
@@ -1981,9 +2324,6 @@ export default function SemesterStudyHub() {
       filesCount,
     };
   }, [activeReviewItems, archivedReviewItems.length, reviews]);
-  const markedCourseCount = useMemo(() => activeCourses.filter((course) => isCourseArchiveMarked(course)).length, [activeCourses]);
-  const markedReviewCount = useMemo(() => activeReviewItems.filter((item) => isReviewArchiveMarked(item)).length, [activeReviewItems]);
-
   async function commitCourses(nextCourses, deletedCourseIds = []) {
     setCourses(nextCourses);
     if (!isSupabaseConfigured || !supabase) return nextCourses;
@@ -2187,6 +2527,27 @@ export default function SemesterStudyHub() {
     resetReviewForm();
   }
 
+  function resetCourseFilters() {
+    setQuery("");
+    setWeekdayFilter("全部星期");
+    setUnfinishedOnly(false);
+    setHasFilesOnly(false);
+  }
+
+  function resetReviewFilters() {
+    setReviewQuery("");
+    setReviewWeekdayFilter("全部星期");
+    setReviewUnfinishedOnly(false);
+    setReviewHasFilesOnly(false);
+  }
+
+  function toggleCourseFileGroupCollapse(category) {
+    setCollapsedCourseFileGroups((prev) => ({
+      ...prev,
+      [category]: !(prev[category] ?? true),
+    }));
+  }
+
   function updateCourseForm(field, value) {
     setCreateForm((prev) => ({ ...prev, [field]: value }));
     setCourseFormErrors((prev) => {
@@ -2265,6 +2626,8 @@ export default function SemesterStudyHub() {
 
   function openCourse(courseId) {
     runWithStatusGuard(() => {
+      cancelCourseBulkMode();
+      setActiveCourseDetailPanel(null);
       setSelectedCourseId(courseId);
       setPage("courseDetail");
     });
@@ -2272,13 +2635,39 @@ export default function SemesterStudyHub() {
 
   function openReviewItem(reviewId) {
     runWithStatusGuard(() => {
+      cancelReviewBulkMode();
+      setActiveReviewDetailPanel(null);
       setSelectedReviewId(reviewId);
       setPage("reviewDetail");
     });
   }
 
   function navigateToPage(nextPage) {
-    runWithStatusGuard(() => setPage(nextPage));
+    runWithStatusGuard(() => {
+      if (nextPage !== "courseDetail") setActiveCourseDetailPanel(null);
+      if (nextPage !== "reviewDetail") setActiveReviewDetailPanel(null);
+      setPage(nextPage);
+    });
+  }
+
+  function startCourseBulkMode(mode) {
+    setCourseBulkMode((prev) => (prev === mode ? null : mode));
+    setSelectedCourseIdsForBatchDelete([]);
+  }
+
+  function startReviewBulkMode(mode) {
+    setReviewBulkMode((prev) => (prev === mode ? null : mode));
+    setSelectedReviewIdsForBatchDelete([]);
+  }
+
+  function cancelCourseBulkMode() {
+    setCourseBulkMode(null);
+    setSelectedCourseIdsForBatchDelete([]);
+  }
+
+  function cancelReviewBulkMode() {
+    setReviewBulkMode(null);
+    setSelectedReviewIdsForBatchDelete([]);
   }
 
   function toggleCourseBatchSelection(courseId) {
@@ -2726,20 +3115,6 @@ export default function SemesterStudyHub() {
     }));
   }
 
-  function toggleCourseArchiveMark(courseId) {
-    patchCourse(courseId, (course) => {
-      if (calcCourseProgress(course) === 100) return course;
-      return { ...course, archiveMarked: !course.archiveMarked };
-    });
-  }
-
-  function toggleReviewArchiveMark(reviewId) {
-    patchReviewItem(reviewId, (item) => {
-      if (calcReviewProgress(item) === 100) return item;
-      return { ...item, archiveMarked: !item.archiveMarked };
-    });
-  }
-
   async function archiveCourse(courseId) {
     const target = courses.find((course) => course.id === courseId);
     await patchCourse(courseId, (course) => ({ ...course, archived: true, archiveMarked: false }));
@@ -2800,60 +3175,6 @@ export default function SemesterStudyHub() {
     setSelectedReviewId(reviewId);
     setPage("reviews");
     if (target) showToast(`已恢复复习条目：${target.name}`);
-  }
-
-  function requestArchiveMarkedCourses() {
-    const markedCourses = activeCourses.filter((course) => isCourseArchiveMarked(course));
-    if (!markedCourses.length) {
-      showToast("还没有标记需要归档的课程。");
-      return;
-    }
-    runWithStatusGuard(() => {
-      requestConfirmation({
-        title: "确认一键归档课程？",
-        description: `将归档 ${markedCourses.length} 门已标记的课程。未标记课程不会受影响。`,
-        confirmLabel: "确认归档",
-        onConfirm: async () => {
-          const markedIds = new Set(markedCourses.map((course) => course.id));
-          const nextCourses = courses.map((course) =>
-            markedIds.has(course.id) ? { ...course, archived: true, archiveMarked: false } : course
-          );
-          await commitCourses(nextCourses);
-          if (selectedCourseId && markedIds.has(selectedCourseId)) {
-            setSelectedCourseId(null);
-            if (page === "courseDetail") setPage("courses");
-          }
-          showToast(`已归档 ${markedCourses.length} 门课程。`);
-        },
-      });
-    });
-  }
-
-  function requestArchiveMarkedReviews() {
-    const markedReviewItems = activeReviewItems.filter((item) => isReviewArchiveMarked(item));
-    if (!markedReviewItems.length) {
-      showToast("还没有标记需要归档的复习条目。");
-      return;
-    }
-    runWithStatusGuard(() => {
-      requestConfirmation({
-        title: "确认一键归档复习？",
-        description: `将归档 ${markedReviewItems.length} 条已标记的复习。未标记条目不会受影响。`,
-        confirmLabel: "确认归档",
-        onConfirm: async () => {
-          const markedIds = new Set(markedReviewItems.map((item) => item.id));
-          const nextReviews = reviews.map((item) =>
-            markedIds.has(item.id) ? { ...item, archived: true, archiveMarked: false } : item
-          );
-          await commitReviews(nextReviews);
-          if (selectedReviewId && markedIds.has(selectedReviewId)) {
-            setSelectedReviewId(null);
-            if (page === "reviewDetail") setPage("reviews");
-          }
-          showToast(`已归档 ${markedReviewItems.length} 条复习。`);
-        },
-      });
-    });
   }
 
   async function deleteCourse(courseId) {
@@ -2967,7 +3288,7 @@ export default function SemesterStudyHub() {
           );
           await commitCourses(courses.filter((course) => !selectedCourseIdsForBatchDelete.includes(course.id)), selectedCourseIdsForBatchDelete);
           setSelectedCourseIdsForBatchDelete([]);
-          setCourseSelectionMode(false);
+          setCourseBulkMode(null);
           showToast(`已批量删除 ${targets.length} 门课程。`);
         },
       });
@@ -2987,8 +3308,54 @@ export default function SemesterStudyHub() {
           );
           await commitReviews(reviews.filter((item) => !selectedReviewIdsForBatchDelete.includes(item.id)), selectedReviewIdsForBatchDelete);
           setSelectedReviewIdsForBatchDelete([]);
-          setReviewSelectionMode(false);
+          setReviewBulkMode(null);
           showToast(`已批量删除 ${targets.length} 条复习。`);
+        },
+      });
+    });
+  }
+
+  function requestArchiveSelectedCourses() {
+    if (!selectedCourseIdsForBatchDelete.length) return;
+    const targets = activeCourses.filter((course) => selectedCourseIdsForBatchDelete.includes(course.id));
+    runWithStatusGuard(() => {
+      requestConfirmation({
+        title: "确认批量归档课程？",
+        description: `将归档 ${targets.length} 门课程。`,
+        confirmLabel: "确认归档",
+        onConfirm: async () => {
+          const targetIds = new Set(selectedCourseIdsForBatchDelete);
+          await commitCourses(courses.map((course) => (targetIds.has(course.id) ? { ...course, archived: true, archiveMarked: false } : course)));
+          if (selectedCourseId && targetIds.has(selectedCourseId) && page === "courseDetail") {
+            setSelectedCourseId(null);
+            setPage("courses");
+          }
+          setSelectedCourseIdsForBatchDelete([]);
+          setCourseBulkMode(null);
+          showToast(`已批量归档 ${targets.length} 门课程。`);
+        },
+      });
+    });
+  }
+
+  function requestArchiveSelectedReviews() {
+    if (!selectedReviewIdsForBatchDelete.length) return;
+    const targets = activeReviewItems.filter((item) => selectedReviewIdsForBatchDelete.includes(item.id));
+    runWithStatusGuard(() => {
+      requestConfirmation({
+        title: "确认批量归档复习？",
+        description: `将归档 ${targets.length} 条复习。`,
+        confirmLabel: "确认归档",
+        onConfirm: async () => {
+          const targetIds = new Set(selectedReviewIdsForBatchDelete);
+          await commitReviews(reviews.map((item) => (targetIds.has(item.id) ? { ...item, archived: true, archiveMarked: false } : item)));
+          if (selectedReviewId && targetIds.has(selectedReviewId) && page === "reviewDetail") {
+            setSelectedReviewId(null);
+            setPage("reviews");
+          }
+          setSelectedReviewIdsForBatchDelete([]);
+          setReviewBulkMode(null);
+          showToast(`已批量归档 ${targets.length} 条复习。`);
         },
       });
     });
@@ -3372,28 +3739,38 @@ export default function SemesterStudyHub() {
   return (
     <div className="min-h-screen bg-zinc-100 text-zinc-900">
       <div className="mx-auto max-w-7xl p-4 md:p-6">
-        <div className="mb-6 rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-            <div>
-              <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-600">
-                <GraduationCap className="h-3.5 w-3.5" />
-                学期课程中心
+        {!isBootstrapping && page === "overview" ? (
+          <div className="mb-6 rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm">
+            <div className="flex flex-col gap-4">
+              <div>
+                <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-600">
+                  <GraduationCap className="h-3.5 w-3.5" />
+                  学期课程中心
+                </div>
+                <h1 className="text-3xl font-semibold tracking-tight text-zinc-950">学期课程总览与打卡</h1>
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-500">
+                  学期范围：{TERM_START} - {TERM_END}。首页看总览，“本学期课程”与“复习模块”看详情，“课程状态”和“复习状态”看本周完成情况，“过往课程”和“过往复习”看历史内容。
+                </p>
               </div>
-              <h1 className="text-3xl font-semibold tracking-tight text-zinc-950">学期课程总览与打卡</h1>
-              <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-500">
-                学期范围：{TERM_START} - {TERM_END}。首页看总览，“本学期课程”与“复习模块”看详情，“课程状态”和“复习状态”看本周完成情况，“过往课程”和“过往复习”看历史内容。
-              </p></div>
-            <div className="flex flex-wrap items-center gap-3">
-              <NavTab active={page === "overview"} icon={<LayoutDashboard className="h-4 w-4" />} label="总览" onClick={() => navigateToPage("overview")} />
-              <NavTab active={page === "courses" || page === "courseDetail"} icon={<BookOpen className="h-4 w-4" />} label="本学期课程" onClick={() => navigateToPage("courses")} />
-              <NavTab active={page === "status"} icon={<CalendarDays className="h-4 w-4" />} label="课程状态" onClick={() => navigateToPage("status")} />
-              <NavTab active={page === "reviews" || page === "reviewDetail"} icon={<ClipboardList className="h-4 w-4" />} label="复习模块" onClick={() => navigateToPage("reviews")} />
-              <NavTab active={page === "reviewStatus"} icon={<CheckCircle2 className="h-4 w-4" />} label="复习状态" onClick={() => navigateToPage("reviewStatus")} />
-              <NavTab active={page === "archive"} icon={<Archive className="h-4 w-4" />} label="过往课程" onClick={() => navigateToPage("archive")} />
-              <NavTab active={page === "reviewArchive"} icon={<Archive className="h-4 w-4" />} label="过往复习" onClick={() => navigateToPage("reviewArchive")} />
             </div>
           </div>
-        </div>
+        ) : null}
+
+        {!isBootstrapping ? (
+          <div className="mb-6">
+            <SectionCard title="页面导航" subtitle="这里保留所有页面入口，切换页面时会一直显示。">
+              <div className="flex flex-wrap items-center gap-3">
+                <NavTab active={page === "overview"} icon={<LayoutDashboard className="h-4 w-4" />} label="总览" onClick={() => navigateToPage("overview")} />
+                <NavTab active={page === "courses" || page === "courseDetail"} icon={<BookOpen className="h-4 w-4" />} label="本学期课程" onClick={() => navigateToPage("courses")} />
+                <NavTab active={page === "status"} icon={<CalendarDays className="h-4 w-4" />} label="课程状态" onClick={() => navigateToPage("status")} />
+                <NavTab active={page === "reviews" || page === "reviewDetail"} icon={<ClipboardList className="h-4 w-4" />} label="复习模块" onClick={() => navigateToPage("reviews")} />
+                <NavTab active={page === "reviewStatus"} icon={<CheckCircle2 className="h-4 w-4" />} label="复习状态" onClick={() => navigateToPage("reviewStatus")} />
+                <NavTab active={page === "archive"} icon={<Archive className="h-4 w-4" />} label="过往课程" onClick={() => navigateToPage("archive")} />
+                <NavTab active={page === "reviewArchive"} icon={<Archive className="h-4 w-4" />} label="过往复习" onClick={() => navigateToPage("reviewArchive")} />
+              </div>
+            </SectionCard>
+          </div>
+        ) : null}
 
         <AnimatePresence>
           {hasUnsavedStatusChanges ? (
@@ -3445,11 +3822,11 @@ export default function SemesterStudyHub() {
         {!isBootstrapping && page === "overview" ? (
           <div className="space-y-6">
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-              <StatCard icon={<BookOpen className="h-5 w-5" />} label="本学期课程" value={stats.activeCount} helper="当前学期正在进行的课程" />
-              <StatCard icon={<CheckCircle2 className="h-5 w-5" />} label="课程本周已完成" value={stats.bothDone} helper={`当前周：${currentWeekLabel}`} />
-              <StatCard icon={<ClipboardList className="h-5 w-5" />} label="课程本周未完成" value={stats.unfinished} helper="上课或作业仍未完成" />
-              <StatCard icon={<ClipboardList className="h-5 w-5" />} label="复习条目" value={reviewStats.count} helper={`待复习：${reviewStats.pending} · 已归档：${reviewStats.archivedCount}`} />
-              <StatCard icon={<FileText className="h-5 w-5" />} label="资料总数" value={stats.filesCount + reviewStats.filesCount} helper={`已归档课程：${stats.archivedCount}`} />
+              <StatCard icon={<BookOpen className="h-5 w-5" />} label="本学期课程" value={stats.activeCount} helper="当前学期正在进行的课程" onClick={() => navigateToPage("courses")} />
+              <StatCard icon={<CheckCircle2 className="h-5 w-5" />} label="课程本周已完成" value={stats.bothDone} helper={`当前周：${currentWeekLabel}`} onClick={() => navigateToPage("status")} />
+              <StatCard icon={<ClipboardList className="h-5 w-5" />} label="课程本周未完成" value={stats.unfinished} helper="上课或作业仍未完成" onClick={() => navigateToPage("status")} />
+              <StatCard icon={<ClipboardList className="h-5 w-5" />} label="复习条目" value={reviewStats.count} helper={`待复习：${reviewStats.pending} · 已归档：${reviewStats.archivedCount}`} onClick={() => navigateToPage("reviews")} />
+              <StatCard icon={<FileText className="h-5 w-5" />} label="资料总数" value={stats.filesCount + reviewStats.filesCount} helper={`已归档课程：${stats.archivedCount}`} onClick={() => navigateToPage("courses")} />
             </div>
 
             <SectionCard title="本周提醒" subtitle="这里只显示当前周还没完成的内容。">
@@ -3535,91 +3912,51 @@ export default function SemesterStudyHub() {
           <SectionCard
             title="本学期课程"
             subtitle="列表页展示课程概览，并支持按星期、完成状态、文件情况筛选。点击“查看”进入单独的课程详情页。"
-            stickyHeader
             right={
-              <StickyActionToolbar>
-                <div className="relative w-56">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
-                  <input
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="搜索课程"
-                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 py-3 pl-10 pr-4 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
-                  />
-                </div>
-                <select
-                  value={weekdayFilter}
-                  onChange={(e) => setWeekdayFilter(e.target.value)}
-                  className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
-                >
-                  <option>全部星期</option>
-                  {DAY_ORDER.map((day) => (
-                    <option key={day}>{day}</option>
-                  ))}
-                </select>
+              <ToolbarRow>
                 <MotionButton
-                  onClick={() => setUnfinishedOnly((prev) => !prev)}
+                  onClick={() => setShowCourseSearchModal(true)}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 sm:min-w-[13rem] sm:w-auto"
+                >
+                  <Search className="h-4 w-4" />
+                  {query || weekdayFilter !== "全部星期" || unfinishedOnly || hasFilesOnly ? "搜索与筛选中" : "搜索与筛选"}
+                </MotionButton>
+                <MotionButton
+                  onClick={() => startCourseBulkMode("archive")}
                   className={classNames(
-                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
-                    unfinishedOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                    "w-full rounded-2xl px-3 py-3 text-sm font-medium transition sm:w-auto",
+                    courseBulkMode === "archive" ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
                   )}
                 >
-                  只看未完成
+                  批量归档
                 </MotionButton>
                 <MotionButton
-                  onClick={() => setHasFilesOnly((prev) => !prev)}
+                  onClick={() => startCourseBulkMode("delete")}
                   className={classNames(
-                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
-                    hasFilesOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                    "w-full rounded-2xl px-3 py-3 text-sm font-medium transition sm:w-auto",
+                    courseBulkMode === "delete" ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
                   )}
                 >
-                  只看有文件
+                  批量删除
                 </MotionButton>
-                <MotionButton
-                  onClick={requestArchiveMarkedCourses}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-sm font-medium text-amber-800 hover:bg-amber-100"
-                >
-                  <Archive className="h-4 w-4" />
-                  一键归档已标记 {markedCourseCount ? `(${markedCourseCount})` : ""}
-                </MotionButton>
-                <MotionButton
-                  onClick={() => {
-                    setCourseSelectionMode((prev) => !prev);
-                    setSelectedCourseIdsForBatchDelete([]);
-                  }}
-                  className={classNames(
-                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
-                    courseSelectionMode ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
-                  )}
-                >
-                  {courseSelectionMode ? "取消批量删除" : "批量删除"}
-                </MotionButton>
-                {courseSelectionMode ? (
-                  <>
-                    <MotionButton
-                      onClick={toggleSelectAllCourses}
-                      className="rounded-2xl border border-zinc-200 bg-white px-3 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-                    >
-                      {selectedCourseIdsForBatchDelete.length === filteredCourses.length && filteredCourses.length ? "取消全选" : "全选当前列表"}
-                    </MotionButton>
-                    <MotionButton
-                      onClick={requestDeleteSelectedCourses}
-                      disabled={!selectedCourseIdsForBatchDelete.length}
-                      className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-3 text-sm font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                      删除已选 {selectedCourseIdsForBatchDelete.length ? `(${selectedCourseIdsForBatchDelete.length})` : ""}
-                    </MotionButton>
-                  </>
-                ) : null}
-                <MotionButton onClick={openCreateModal} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-3 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+                <MotionButton onClick={openCreateModal} className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-zinc-900 px-3 py-3 text-sm font-medium text-white hover:bg-zinc-800 sm:w-auto">
                   <Plus className="h-4 w-4" />
                   新建
                 </MotionButton>
-              </StickyActionToolbar>
+              </ToolbarRow>
             }
           >
             <div className="space-y-4">
+              {courseBulkMode ? (
+                <BulkActionBar
+                  mode={courseBulkMode}
+                  count={selectedCourseIdsForBatchDelete.length}
+                  totalCount={filteredCourses.length}
+                  onToggleAll={toggleSelectAllCourses}
+                  onSubmit={courseBulkMode === "delete" ? requestDeleteSelectedCourses : requestArchiveSelectedCourses}
+                  onCancel={cancelCourseBulkMode}
+                />
+              ) : null}
               {filteredCourses.length ? (
                 filteredCourses.map((course) => (
                   <CourseCard
@@ -3631,8 +3968,7 @@ export default function SemesterStudyHub() {
                     onEdit={() => openEditModal(course)}
                     onDelete={() => requestDeleteCourse(course.id)}
                     onArchive={() => requestArchiveCourse(course.id)}
-                    onToggleArchiveMark={() => toggleCourseArchiveMark(course.id)}
-                    selectionMode={courseSelectionMode}
+                    bulkMode={courseBulkMode}
                     checked={selectedCourseIdsForBatchDelete.includes(course.id)}
                     onToggleSelect={() => toggleCourseBatchSelection(course.id)}
                   />
@@ -3649,15 +3985,15 @@ export default function SemesterStudyHub() {
             <div className="space-y-6">
               <SectionCard
                 title="课程详情"
-                subtitle="这里集中展示这门课的当前信息、本周状态、本周摘要、每周记录和文件上传。"
+                subtitle="保留本周状态和本周摘要在当前页面，其余模块点击后会在浮层里展开。"
                 right={
-                  <MotionButton onClick={() => navigateToPage("courses")} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                  <MotionButton onClick={() => navigateToPage("courses")} className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 sm:w-auto">
                     <ArrowLeft className="h-4 w-4" />
                     返回课程列表
                   </MotionButton>
                 }
               >
-                <div className="rounded-[2rem] border border-zinc-200 bg-zinc-50 p-6">
+                <div className="rounded-[2rem] border border-zinc-200 bg-zinc-50 p-4 sm:p-6">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div>
                       <div className="mb-2 inline-flex rounded-full bg-white px-3 py-1 text-xs font-medium text-zinc-600">{selectedCourse.kind}</div>
@@ -3668,30 +4004,16 @@ export default function SemesterStudyHub() {
                         {selectedCourse.teacher ? ` · ${selectedCourse.teacher}` : ""}
                       </p>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <MotionButton onClick={() => openEditModal(selectedCourse)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                    <div className="grid w-full grid-cols-1 gap-2 sm:w-auto sm:grid-cols-3">
+                      <MotionButton onClick={() => openEditModal(selectedCourse)} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
                         <Pencil className="h-4 w-4" />
                         编辑
                       </MotionButton>
-                      <MotionButton
-                        onClick={() => toggleCourseArchiveMark(selectedCourse.id)}
-                        disabled={calcCourseProgress(selectedCourse) === 100}
-                        className={classNames(
-                          "inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium",
-                          isCourseArchiveMarked(selectedCourse)
-                            ? "border border-amber-200 bg-amber-50 text-amber-800"
-                            : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
-                          calcCourseProgress(selectedCourse) === 100 ? "cursor-not-allowed opacity-70" : ""
-                        )}
-                      >
-                        <CheckCircle2 className="h-4 w-4" />
-                        {calcCourseProgress(selectedCourse) === 100 ? "已自动标记归档" : selectedCourse.archiveMarked ? "取消归档标记" : "标记归档"}
-                      </MotionButton>
-                      <MotionButton onClick={() => requestArchiveCourse(selectedCourse.id)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                      <MotionButton onClick={() => requestArchiveCourse(selectedCourse.id)} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
                         <Archive className="h-4 w-4" />
                         归档
                       </MotionButton>
-                      <MotionButton onClick={() => requestDeleteCourse(selectedCourse.id)} className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-4 py-3 text-sm font-medium text-red-600 hover:bg-red-50">
+                      <MotionButton onClick={() => requestDeleteCourse(selectedCourse.id)} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-red-200 bg-white px-4 py-3 text-sm font-medium text-red-600 hover:bg-red-50">
                         <Trash2 className="h-4 w-4" />
                         删除
                       </MotionButton>
@@ -3745,37 +4067,8 @@ export default function SemesterStudyHub() {
                 </div>
               </SectionCard>
 
-              <SectionCard title="当前信息" subtitle="这些信息与新建课程时填写的字段一致。">
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                    <div className="text-xs font-medium text-zinc-500">课程名称</div>
-                    <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.name || "未填写"}</div>
-                  </div>
-                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                    <div className="text-xs font-medium text-zinc-500">授课教师</div>
-                    <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.teacher || "未填写"}</div>
-                  </div>
-                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                    <div className="text-xs font-medium text-zinc-500">课程类型</div>
-                    <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.kind || "未填写"}</div>
-                  </div>
-                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                    <div className="text-xs font-medium text-zinc-500">星期</div>
-                    <div className="mt-2 text-sm font-medium text-zinc-900">{getScheduleWeekdays(getEntityScheduleEntries(selectedCourse)).join(" / ") || "未填写"}</div>
-                  </div>
-                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                    <div className="text-xs font-medium text-zinc-500">上课时间</div>
-                    <div className="mt-2 text-sm font-medium text-zinc-900">{getEntityScheduleLabel(selectedCourse) || "未填写"}</div>
-                  </div>
-                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                    <div className="text-xs font-medium text-zinc-500">教室 / 地点</div>
-                    <div className="mt-2 text-sm font-medium text-zinc-900">{selectedCourse.room || "未填写"}</div>
-                  </div>
-                </div>
-              </SectionCard>
-
-              <SectionCard title="本周摘要" subtitle="这里汇总这门课本周还要处理的事项，以及最近上传的资料。">
-                <div className="grid gap-4 xl:grid-cols-2">
+              <SectionCard title="本周摘要" subtitle="简要看一下这门课本周待办和最近一份资料。">
+                <div className="grid gap-4 md:grid-cols-2">
                   <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
                     <div className="text-sm font-semibold text-zinc-900">本周待办</div>
                     {selectedCourseTodoItems.length ? (
@@ -3790,132 +4083,53 @@ export default function SemesterStudyHub() {
                       <div className="mt-3 rounded-2xl bg-emerald-100 px-3 py-3 text-sm font-medium text-emerald-700">本周这门课已经全部完成。</div>
                     )}
                   </div>
-                  <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
+                  <MotionButton
+                    onClick={() => setActiveCourseDetailPanel("recent")}
+                    className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4 text-left transition hover:border-zinc-300 hover:bg-white"
+                  >
                     <div className="flex items-center justify-between gap-3">
                       <div className="text-sm font-semibold text-zinc-900">最近上传</div>
-                      <span className="rounded-full bg-white px-3 py-1 text-xs text-zinc-500">{selectedCourseRecentFiles.length} 个最近文件</span>
+                      <span className="rounded-full bg-white px-3 py-1 text-xs text-zinc-500">{selectedCourseRecentFiles.length} 个文件</span>
                     </div>
-                    {selectedCourseRecentFiles.length ? (
-                      <div className="mt-3 space-y-3">
-                        {selectedCourseRecentFiles.map((file) => (
-                          <div key={file.id} className="rounded-2xl border border-zinc-200 bg-white px-4 py-3">
-                            <div className="text-sm font-medium text-zinc-900">{file.name}</div>
-                            <div className="mt-1 text-xs text-zinc-500">{file.category} · {formatDateTime(file.uploadedAt)}</div>
-                          </div>
-                        ))}
+                    {latestSelectedCourseFile ? (
+                      <div className="mt-3 flex items-center gap-3">
+                        <FileCoverThumbnail file={latestSelectedCourseFile} />
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-zinc-900">{latestSelectedCourseFile.name}</div>
+                          <div className="mt-1 text-xs text-zinc-500">{latestSelectedCourseFile.category} · {formatDateTime(latestSelectedCourseFile.uploadedAt)}</div>
+                          <div className="mt-2 text-xs font-medium text-zinc-600">点击查看最近上传文件</div>
+                        </div>
                       </div>
                     ) : (
                       <div className="mt-3 text-sm text-zinc-500">这门课还没有上传过资料。</div>
                     )}
-                  </div>
+                  </MotionButton>
                 </div>
               </SectionCard>
 
-              <SectionCard
-                title="课程文件"
-                subtitle="上传和管理当前课程的文件都放在这里。"
-                right={
-                  <div className="flex flex-wrap items-center gap-2">
-                    <select
-                      value={uploadCategory}
-                      onChange={(e) => setUploadCategory(e.target.value)}
-                      className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
-                    >
-                      {FILE_CATEGORIES.map((category) => (
-                        <option key={category}>{category}</option>
-                      ))}
-                    </select>
-                    <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUpload} />
-                    <MotionButton
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={uploading}
-                      className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
-                    >
-                      <Upload className="h-4 w-4" />
-                      {uploading ? "上传中..." : `上传到${uploadCategory}`}
-                    </MotionButton>
-                  </div>
-                }
-              >
-                <div className="space-y-4">
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    onDragEnter={handleFileDragEnter}
-                    onDragOver={handleFileDragOver}
-                    onDragLeave={handleFileDragLeave}
-                    onDrop={handleFileDrop}
-                    className={classNames(
-                      "w-full rounded-3xl border-2 border-dashed px-5 py-6 text-left transition",
-                      isFileDragActive ? "border-zinc-900 bg-zinc-100" : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-white"
-                    )}
-                  >
-                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <div className="text-sm font-semibold text-zinc-900">{uploading ? "正在上传文件..." : "拖拽文件到这里，或点击选择文件"}</div>
-                        <div className="mt-1 text-sm text-zinc-500">会按当前分类“{uploadCategory}”直接上传到这门课里。</div>
-                      </div>
-                      <span className="rounded-full bg-white px-3 py-2 text-xs font-medium text-zinc-600 shadow-sm">
-                        支持多文件
-                      </span>
-                    </div>
-                  </button>
-                  {selectedCourseFiles.map((group) => (
-                    <FileSection
-                      key={group.category}
-                      title={group.category}
-                      files={group.items}
-                      busyFileId={busyFileId}
-                      onOpen={(file) => openStoredFile(file, false)}
-                      onDownload={(file) => openStoredFile(file, true)}
-                      onDelete={(fileId) => requestRemoveFile(selectedCourse.id, fileId)}
-                    />
-                  ))}
-                </div>
-              </SectionCard>
-
-              <SectionCard
-                title="每周记录"
-                subtitle="按周切换上课与作业完成状态。"
-                right={
-                  <StatusActionBar
-                    hasUnsavedStatusChanges={hasUnsavedCourseStatusChanges}
-                    changedCount={statusDraftSummary.fieldCount}
-                    onDiscard={discardStatusChanges}
-                    onSave={saveStatusChanges}
-                    sticky
+              <SectionCard title="更多模块" subtitle="除本周状态和本周摘要外，其余内容都收进这里。点击卡片后会在浮层里展开。">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  <DetailModuleCard
+                    icon={<BookOpen className="h-5 w-5" />}
+                    title="当前信息"
+                    description="查看课程名称、教师、星期、时间和地点。"
+                    meta="基础信息"
+                    onClick={() => setActiveCourseDetailPanel("info")}
                   />
-                }
-              >
-                <div className="overflow-x-auto">
-                  <table className="min-w-full border-separate border-spacing-y-2">
-                    <thead>
-                      <tr className="text-left text-sm text-zinc-500">
-                        <th className="px-3">周次</th>
-                        <th className="px-3">上课</th>
-                        <th className="px-3">作业</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedCourse.weeklyRecords.map((record) => {
-                        const isCurrentWeek = record.weekNumber === currentWeekNumber;
-                        return (
-                          <tr key={record.id} className={classNames("bg-zinc-50 text-sm shadow-sm", isCurrentWeek ? "ring-1 ring-zinc-300" : "") }>
-                            <td className="rounded-l-3xl px-3 py-3 align-middle">
-                              <div className="font-medium text-zinc-900">{record.label}</div>
-                              {isCurrentWeek ? <div className="mt-1 text-xs text-zinc-500">当前周</div> : null}
-                            </td>
-                            <td className="px-3 py-3 align-middle">
-                              <StatusPill done={record.lectureDone} doneLabel="已上" todoLabel="未上" onClick={() => toggleWeeklyField(selectedCourse.id, record.weekNumber, "lectureDone")} />
-                            </td>
-                            <td className="rounded-r-3xl px-3 py-3 align-middle">
-                              <StatusPill done={record.homeworkDone} doneLabel="已写" todoLabel="未写" onClick={() => toggleWeeklyField(selectedCourse.id, record.weekNumber, "homeworkDone")} />
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                  <DetailModuleCard
+                    icon={<FileText className="h-5 w-5" />}
+                    title="课程文件"
+                    description="上传和管理课程资料，文件分类默认收起。"
+                    meta={`${selectedCourse.files?.length || 0} 个文件`}
+                    onClick={() => setActiveCourseDetailPanel("files")}
+                  />
+                  <DetailModuleCard
+                    icon={<CalendarDays className="h-5 w-5" />}
+                    title="每周记录"
+                    description="按周查看和修改上课、作业完成状态。"
+                    meta={`${selectedCourse.weeklyRecords.length} 周`}
+                    onClick={() => setActiveCourseDetailPanel("records")}
+                  />
                 </div>
               </SectionCard>
             </div>
@@ -3937,91 +4151,51 @@ export default function SemesterStudyHub() {
           <SectionCard
             title="复习模块"
             subtitle="这里管理所有复习条目。新建时直接从本学期课程里选择，并复制课程文件作为复习文件。"
-            stickyHeader
             right={
-              <StickyActionToolbar>
-                <div className="relative w-56">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
-                  <input
-                    value={reviewQuery}
-                    onChange={(e) => setReviewQuery(e.target.value)}
-                    placeholder="搜索复习条目"
-                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 py-3 pl-10 pr-4 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
-                  />
-                </div>
-                <select
-                  value={reviewWeekdayFilter}
-                  onChange={(e) => setReviewWeekdayFilter(e.target.value)}
-                  className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
-                >
-                  <option>全部星期</option>
-                  {DAY_ORDER.map((day) => (
-                    <option key={day}>{day}</option>
-                  ))}
-                </select>
+              <ToolbarRow>
                 <MotionButton
-                  onClick={() => setReviewUnfinishedOnly((prev) => !prev)}
+                  onClick={() => setShowReviewSearchModal(true)}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 sm:min-w-[13rem] sm:w-auto"
+                >
+                  <Search className="h-4 w-4" />
+                  {reviewQuery || reviewWeekdayFilter !== "全部星期" || reviewUnfinishedOnly || reviewHasFilesOnly ? "搜索与筛选中" : "搜索与筛选"}
+                </MotionButton>
+                <MotionButton
+                  onClick={() => startReviewBulkMode("archive")}
                   className={classNames(
-                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
-                    reviewUnfinishedOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                    "w-full rounded-2xl px-3 py-3 text-sm font-medium transition sm:w-auto",
+                    reviewBulkMode === "archive" ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
                   )}
                 >
-                  只看未复习
+                  批量归档
                 </MotionButton>
                 <MotionButton
-                  onClick={() => setReviewHasFilesOnly((prev) => !prev)}
+                  onClick={() => startReviewBulkMode("delete")}
                   className={classNames(
-                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
-                    reviewHasFilesOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                    "w-full rounded-2xl px-3 py-3 text-sm font-medium transition sm:w-auto",
+                    reviewBulkMode === "delete" ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
                   )}
                 >
-                  只看有文件
+                  批量删除
                 </MotionButton>
-                <MotionButton
-                  onClick={requestArchiveMarkedReviews}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-sm font-medium text-amber-800 hover:bg-amber-100"
-                >
-                  <Archive className="h-4 w-4" />
-                  一键归档已标记 {markedReviewCount ? `(${markedReviewCount})` : ""}
-                </MotionButton>
-                <MotionButton
-                  onClick={() => {
-                    setReviewSelectionMode((prev) => !prev);
-                    setSelectedReviewIdsForBatchDelete([]);
-                  }}
-                  className={classNames(
-                    "rounded-2xl px-3 py-3 text-sm font-medium transition",
-                    reviewSelectionMode ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
-                  )}
-                >
-                  {reviewSelectionMode ? "取消批量删除" : "批量删除"}
-                </MotionButton>
-                {reviewSelectionMode ? (
-                  <>
-                    <MotionButton
-                      onClick={toggleSelectAllReviews}
-                      className="rounded-2xl border border-zinc-200 bg-white px-3 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-                    >
-                      {selectedReviewIdsForBatchDelete.length === filteredReviewItems.length && filteredReviewItems.length ? "取消全选" : "全选当前列表"}
-                    </MotionButton>
-                    <MotionButton
-                      onClick={requestDeleteSelectedReviews}
-                      disabled={!selectedReviewIdsForBatchDelete.length}
-                      className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-3 text-sm font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                      删除已选 {selectedReviewIdsForBatchDelete.length ? `(${selectedReviewIdsForBatchDelete.length})` : ""}
-                    </MotionButton>
-                  </>
-                ) : null}
-                <MotionButton onClick={openReviewModal} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-3 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+                <MotionButton onClick={openReviewModal} className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-zinc-900 px-3 py-3 text-sm font-medium text-white hover:bg-zinc-800 sm:w-auto">
                   <Plus className="h-4 w-4" />
                   从课程新建
                 </MotionButton>
-              </StickyActionToolbar>
+              </ToolbarRow>
             }
           >
             <div className="space-y-4">
+              {reviewBulkMode ? (
+                <BulkActionBar
+                  mode={reviewBulkMode}
+                  count={selectedReviewIdsForBatchDelete.length}
+                  totalCount={filteredReviewItems.length}
+                  onToggleAll={toggleSelectAllReviews}
+                  onSubmit={reviewBulkMode === "delete" ? requestDeleteSelectedReviews : requestArchiveSelectedReviews}
+                  onCancel={cancelReviewBulkMode}
+                />
+              ) : null}
               {filteredReviewItems.length ? (
                 filteredReviewItems.map((item) => (
                   <ReviewCard
@@ -4030,8 +4204,8 @@ export default function SemesterStudyHub() {
                     selected={selectedReviewId === item.id}
                     onOpen={() => openReviewItem(item.id)}
                     onDelete={() => requestDeleteReviewItem(item.id)}
-                    onToggleArchiveMark={() => toggleReviewArchiveMark(item.id)}
-                    selectionMode={reviewSelectionMode}
+                    onArchive={() => requestArchiveReviewItem(item.id)}
+                    bulkMode={reviewBulkMode}
                     checked={selectedReviewIdsForBatchDelete.includes(item.id)}
                     onToggleSelect={() => toggleReviewBatchSelection(item.id)}
                   />
@@ -4091,15 +4265,15 @@ export default function SemesterStudyHub() {
             <div className="space-y-6">
               <SectionCard
                 title="复习详情"
-                subtitle="这里集中展示这条复习计划的信息、复习进度和复习文件。"
+                subtitle="复习相关内容已整理成模块入口，点击卡片后会在浮层里展开。"
                 right={
-                  <MotionButton onClick={() => navigateToPage("reviews")} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                  <MotionButton onClick={() => navigateToPage("reviews")} className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 sm:w-auto">
                     <ArrowLeft className="h-4 w-4" />
                     返回复习列表
                   </MotionButton>
                 }
               >
-                <div className="rounded-[2rem] border border-zinc-200 bg-zinc-50 p-6">
+                <div className="rounded-[2rem] border border-zinc-200 bg-zinc-50 p-4 sm:p-6">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div>
                       <div className="mb-2 inline-flex rounded-full bg-white px-3 py-1 text-xs font-medium text-zinc-600">{selectedReview.subject || "复习条目"}</div>
@@ -4109,35 +4283,21 @@ export default function SemesterStudyHub() {
                         {selectedReview.room ? ` · ${selectedReview.room}` : ""}
                       </p>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="grid w-full grid-cols-1 gap-2 sm:w-auto sm:grid-cols-2">
                       {!selectedReview.archived ? (
                         <>
-                          <MotionButton
-                            onClick={() => toggleReviewArchiveMark(selectedReview.id)}
-                            disabled={selectedReviewProgress === 100}
-                            className={classNames(
-                              "inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium",
-                              isReviewArchiveMarked(selectedReview)
-                                ? "border border-amber-200 bg-amber-50 text-amber-800"
-                                : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
-                              selectedReviewProgress === 100 ? "cursor-not-allowed opacity-70" : ""
-                            )}
-                          >
-                            <CheckCircle2 className="h-4 w-4" />
-                            {selectedReviewProgress === 100 ? "已自动标记归档" : selectedReview.archiveMarked ? "取消归档标记" : "标记归档"}
-                          </MotionButton>
-                          <MotionButton onClick={() => requestArchiveReviewItem(selectedReview.id)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                          <MotionButton onClick={() => requestArchiveReviewItem(selectedReview.id)} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
                             <Archive className="h-4 w-4" />
                             归档
                           </MotionButton>
                         </>
                       ) : (
-                        <MotionButton onClick={() => restoreReviewItem(selectedReview.id)} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                        <MotionButton onClick={() => restoreReviewItem(selectedReview.id)} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
                           <RotateCcw className="h-4 w-4" />
                           恢复
                         </MotionButton>
                       )}
-                      <MotionButton onClick={() => requestDeleteReviewItem(selectedReview.id)} className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-4 py-3 text-sm font-medium text-red-600 hover:bg-red-50">
+                      <MotionButton onClick={() => requestDeleteReviewItem(selectedReview.id)} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-red-200 bg-white px-4 py-3 text-sm font-medium text-red-600 hover:bg-red-50">
                         <Trash2 className="h-4 w-4" />
                         删除
                       </MotionButton>
@@ -4146,111 +4306,29 @@ export default function SemesterStudyHub() {
                 </div>
               </SectionCard>
 
-              <SectionCard
-                title="复习进度"
-                subtitle="每看完一个复习文件，就可以把它标记为已复习，进度会自动增长。"
-              >
-                <div className="grid gap-4 md:grid-cols-3">
-                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                    <div className="text-xs font-medium text-zinc-500">当前进度</div>
-                    <div className="mt-3 text-2xl font-semibold text-zinc-950">{selectedReviewProgress}%</div>
-                  </div>
-                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                    <div className="text-xs font-medium text-zinc-500">已复习文件</div>
-                    <div className="mt-3 text-2xl font-semibold text-zinc-950">{selectedReview.files.filter((file) => file.reviewed).length}</div>
-                  </div>
-                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                    <div className="text-xs font-medium text-zinc-500">总体状态</div>
-                    <div className={classNames("mt-3 inline-flex rounded-full px-3 py-2 text-sm font-medium", selectedReviewProgress === 100 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
-                      {selectedReviewProgress === 100 ? "已复习" : "未复习"}
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-4">
-                  <ProgressBar value={selectedReviewProgress} />
-                </div>
-              </SectionCard>
-
-              <SectionCard title="最近上传" subtitle="保留最近新增到这条复习里的文件记录。">
-                {selectedReviewRecentFiles.length ? (
-                  <div className="space-y-3">
-                    {selectedReviewRecentFiles.map((file) => (
-                      <div key={file.id} className="rounded-2xl border border-zinc-200 bg-white px-4 py-3">
-                        <div className="text-sm font-medium text-zinc-900">{file.name}</div>
-                        <div className="mt-1 text-xs text-zinc-500">{file.category} · {formatDateTime(file.uploadedAt)}</div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-sm text-zinc-500">这条复习还没有上传过资料。</div>
-                )}
-              </SectionCard>
-
-              <SectionCard
-                title="复习文件"
-                subtitle="这些文件来自对应课程，分类保持一致。你可以逐个标记是否已经复习，也可以额外上传复习资料。"
-                right={
-                  <div className="flex flex-wrap items-center gap-2">
-                    <select
-                      value={reviewUploadCategory}
-                      onChange={(e) => setReviewUploadCategory(e.target.value)}
-                      className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
-                    >
-                      {FILE_CATEGORIES.map((category) => (
-                        <option key={category}>{category}</option>
-                      ))}
-                    </select>
-                    <input ref={reviewFileInputRef} type="file" multiple className="hidden" onChange={handleReviewUpload} />
-                    <MotionButton
-                      onClick={() => reviewFileInputRef.current?.click()}
-                      disabled={reviewUploading}
-                      className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:bg-zinc-100"
-                    >
-                      <Upload className="h-4 w-4" />
-                      {reviewUploading ? "上传中..." : "上传复习文件"}
-                    </MotionButton>
-                    <MotionButton
-                      onClick={() => syncReviewFilesFromCourse(selectedReview.id)}
-                      disabled={reviewUploading || !selectedReviewSourceCourse}
-                      className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:bg-zinc-400"
-                    >
-                      同步还原课程文件
-                    </MotionButton>
-                  </div>
-                }
-              >
-                <div className="space-y-4">
-                  <button
-                    type="button"
-                    onClick={() => reviewFileInputRef.current?.click()}
-                    onDragEnter={handleReviewFileDragEnter}
-                    onDragOver={handleReviewFileDragOver}
-                    onDragLeave={handleReviewFileDragLeave}
-                    onDrop={handleReviewFileDrop}
-                    className={classNames(
-                      "w-full rounded-3xl border-2 border-dashed px-5 py-6 text-left transition",
-                      isReviewFileDragActive ? "border-zinc-900 bg-zinc-100" : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-white"
-                    )}
-                  >
-                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <div className="text-sm font-semibold text-zinc-900">{reviewUploading ? "正在上传文件..." : "拖拽文件到这里，或点击选择文件"}</div>
-                        <div className="mt-1 text-sm text-zinc-500">会按当前分类“{reviewUploadCategory}”直接上传到这条复习里。</div>
-                      </div>
-                      <span className="rounded-full bg-white px-3 py-2 text-xs font-medium text-zinc-600 shadow-sm">支持多文件</span>
-                    </div>
-                  </button>
-                  {selectedReviewFiles.map((group) => (
-                    <ReviewFileSection
-                      key={group.category}
-                      title={group.category}
-                      files={group.items}
-                      busyFileId={reviewBusyFileId}
-                      onOpen={(file) => openStoredReviewFile(file, false)}
-                      onDownload={(file) => openStoredReviewFile(file, true)}
-                      onToggleReview={(fileId) => toggleReviewFileReviewed(selectedReview.id, fileId)}
-                    />
-                  ))}
+              <SectionCard title="复习模块" subtitle="复习详情里的内容也收进模块卡片里，点击后在浮层查看。">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  <DetailModuleCard
+                    icon={<CheckCircle2 className="h-5 w-5" />}
+                    title="复习进度"
+                    description="查看当前进度、已复习文件数和整体状态。"
+                    meta={`${selectedReviewProgress}%`}
+                    onClick={() => setActiveReviewDetailPanel("progress")}
+                  />
+                  <DetailModuleCard
+                    icon={<Upload className="h-5 w-5" />}
+                    title="最近上传"
+                    description="只看这条复习最近新增的文件记录。"
+                    meta={`${selectedReviewRecentFiles.length} 个最近文件`}
+                    onClick={() => setActiveReviewDetailPanel("recent")}
+                  />
+                  <DetailModuleCard
+                    icon={<FileText className="h-5 w-5" />}
+                    title="复习文件"
+                    description="查看、上传、同步和打卡复习文件。"
+                    meta={`${selectedReview.files?.length || 0} 个文件`}
+                    onClick={() => setActiveReviewDetailPanel("files")}
+                  />
                 </div>
               </SectionCard>
             </div>
@@ -4274,7 +4352,7 @@ export default function SemesterStudyHub() {
             subtitle="已归档课程会放在这里，之后也可以恢复。支持按关键词和星期筛选。"
             right={
               <div className="flex flex-wrap items-center gap-2">
-                <div className="relative w-56">
+                <div className="relative w-full sm:w-56">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
                   <input
                     value={archiveQuery}
@@ -4331,7 +4409,7 @@ export default function SemesterStudyHub() {
             subtitle="这里展示已经归档的复习条目。可以按关键词和星期筛选。"
             right={
               <div className="flex flex-wrap items-center gap-2">
-                <div className="relative w-56">
+                <div className="relative w-full sm:w-56">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
                   <input
                     value={reviewArchiveQuery}
@@ -4377,6 +4455,120 @@ export default function SemesterStudyHub() {
           </SectionCard>
         ) : null}
       </div>
+
+      <Modal
+        open={Boolean(selectedCourse && activeCourseDetailPanel)}
+        onClose={() => setActiveCourseDetailPanel(null)}
+        title={
+          activeCourseDetailPanel === "info"
+            ? "当前信息"
+            : activeCourseDetailPanel === "files"
+              ? "课程文件"
+              : activeCourseDetailPanel === "recent"
+                ? "最近上传"
+                : activeCourseDetailPanel === "records"
+                  ? "每周记录"
+                  : "课程详情"
+        }
+        panelClassName="max-w-5xl"
+      >
+        {activeCourseDetailPanel === "info" ? (
+          <div className="space-y-4">
+            <p className="text-sm text-zinc-500">这些信息与新建课程时填写的字段一致。</p>
+            {courseInfoContent}
+          </div>
+        ) : null}
+        {activeCourseDetailPanel === "files" ? (
+          <div className="space-y-4">
+            <p className="text-sm text-zinc-500">上传和管理当前课程的文件都放在这里。所有分类默认收起，按需展开即可。</p>
+            {courseFilesContent}
+          </div>
+        ) : null}
+        {activeCourseDetailPanel === "recent" ? (
+          <div className="space-y-4">
+            <p className="text-sm text-zinc-500">这里展示这门课最近上传的文件列表。</p>
+            {selectedCourseRecentFiles.length ? (
+              <div className="space-y-3">
+                {selectedCourseRecentFiles.map((file) => (
+                  <div key={file.id} className="flex items-center gap-4 rounded-2xl border border-zinc-200 bg-white p-4">
+                    <FileCoverThumbnail file={file} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-zinc-900">{file.name}</div>
+                      <div className="mt-1 text-xs text-zinc-500">{file.category} · {formatDateTime(file.uploadedAt)}</div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <MotionButton
+                        onClick={() => openStoredFile(file, false)}
+                        disabled={busyFileId === file.id}
+                        className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+                      >
+                        打开
+                      </MotionButton>
+                      <MotionButton
+                        onClick={() => openStoredFile(file, true)}
+                        disabled={busyFileId === file.id}
+                        className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+                      >
+                        下载
+                      </MotionButton>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-zinc-500">这门课还没有上传过资料。</div>
+            )}
+          </div>
+        ) : null}
+        {activeCourseDetailPanel === "records" ? (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <p className="text-sm text-zinc-500">按周切换上课与作业完成状态。</p>
+              <StatusActionBar
+                hasUnsavedStatusChanges={hasUnsavedCourseStatusChanges}
+                changedCount={statusDraftSummary.fieldCount}
+                onDiscard={discardStatusChanges}
+                onSave={saveStatusChanges}
+              />
+            </div>
+            {courseWeeklyRecordsContent}
+          </div>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={Boolean(selectedReview && activeReviewDetailPanel)}
+        onClose={() => setActiveReviewDetailPanel(null)}
+        title={
+          activeReviewDetailPanel === "progress"
+            ? "复习进度"
+            : activeReviewDetailPanel === "recent"
+              ? "最近上传"
+              : activeReviewDetailPanel === "files"
+                ? "复习文件"
+                : "复习详情"
+        }
+        panelClassName="max-w-5xl"
+      >
+        {activeReviewDetailPanel === "progress" ? (
+          <div className="space-y-4">
+            <p className="text-sm text-zinc-500">每看完一个复习文件，就可以把它标记为已复习，进度会自动增长。</p>
+            {reviewProgressContent}
+          </div>
+        ) : null}
+        {activeReviewDetailPanel === "recent" ? (
+          <div className="space-y-4">
+            <p className="text-sm text-zinc-500">保留最近新增到这条复习里的文件记录。</p>
+            {reviewRecentFilesContent}
+          </div>
+        ) : null}
+        {activeReviewDetailPanel === "files" ? (
+          <div className="space-y-4">
+            <p className="text-sm text-zinc-500">这些文件来自对应课程，分类保持一致。你可以逐个标记是否已经复习，也可以额外上传复习资料。</p>
+            {reviewFilesContent}
+          </div>
+        ) : null}
+      </Modal>
 
       <Modal open={showCreateModal} onClose={closeCourseModal} title={editingCourseId ? "编辑课程" : "新建课程"}>
         <div className="grid gap-4 md:grid-cols-2">
@@ -4484,6 +4676,48 @@ export default function SemesterStudyHub() {
           </MotionButton>
         </div>
       </Modal>
+      <Modal open={showCourseSearchModal} onClose={() => setShowCourseSearchModal(false)} title="搜索课程">
+        <div className="space-y-4">
+          <label className="block">
+            <div className="mb-2 text-sm font-medium text-zinc-700">关键词</div>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="课程名、教师、类型"
+              className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+            />
+          </label>
+          <label className="block">
+            <div className="mb-2 text-sm font-medium text-zinc-700">星期</div>
+            <select
+              value={weekdayFilter}
+              onChange={(e) => setWeekdayFilter(e.target.value)}
+              className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+            >
+              <option>全部星期</option>
+              {DAY_ORDER.map((day) => (
+                <option key={day}>{day}</option>
+              ))}
+            </select>
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <MotionButton onClick={() => setUnfinishedOnly((prev) => !prev)} className={classNames("rounded-2xl px-3 py-3 text-sm font-medium transition", unfinishedOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50")}>
+              只看未完成
+            </MotionButton>
+            <MotionButton onClick={() => setHasFilesOnly((prev) => !prev)} className={classNames("rounded-2xl px-3 py-3 text-sm font-medium transition", hasFilesOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50")}>
+              只看有文件
+            </MotionButton>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <MotionButton onClick={resetCourseFilters} className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+              清空条件
+            </MotionButton>
+            <MotionButton onClick={() => setShowCourseSearchModal(false)} className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+              搜索
+            </MotionButton>
+          </div>
+        </div>
+      </Modal>
       <Modal open={showReviewModal} onClose={closeReviewModal} title="从课程新建复习条目">
         <div className="space-y-4">
           <label className="block">
@@ -4517,6 +4751,48 @@ export default function SemesterStudyHub() {
             <Plus className="h-4 w-4" />
             {isSavingReview ? "创建中..." : "创建复习条目"}
           </MotionButton>
+        </div>
+      </Modal>
+      <Modal open={showReviewSearchModal} onClose={() => setShowReviewSearchModal(false)} title="搜索复习">
+        <div className="space-y-4">
+          <label className="block">
+            <div className="mb-2 text-sm font-medium text-zinc-700">关键词</div>
+            <input
+              value={reviewQuery}
+              onChange={(e) => setReviewQuery(e.target.value)}
+              placeholder="复习条目、分类、地点"
+              className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+            />
+          </label>
+          <label className="block">
+            <div className="mb-2 text-sm font-medium text-zinc-700">星期</div>
+            <select
+              value={reviewWeekdayFilter}
+              onChange={(e) => setReviewWeekdayFilter(e.target.value)}
+              className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+            >
+              <option>全部星期</option>
+              {DAY_ORDER.map((day) => (
+                <option key={day}>{day}</option>
+              ))}
+            </select>
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <MotionButton onClick={() => setReviewUnfinishedOnly((prev) => !prev)} className={classNames("rounded-2xl px-3 py-3 text-sm font-medium transition", reviewUnfinishedOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50")}>
+              只看未复习
+            </MotionButton>
+            <MotionButton onClick={() => setReviewHasFilesOnly((prev) => !prev)} className={classNames("rounded-2xl px-3 py-3 text-sm font-medium transition", reviewHasFilesOnly ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50")}>
+              只看有文件
+            </MotionButton>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <MotionButton onClick={resetReviewFilters} className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+              清空条件
+            </MotionButton>
+            <MotionButton onClick={() => setShowReviewSearchModal(false)} className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+              搜索
+            </MotionButton>
+          </div>
         </div>
       </Modal>
       <Modal open={Boolean(confirmState)} onClose={() => setConfirmState(null)} title={confirmState?.title || "确认操作"}>
