@@ -1360,6 +1360,8 @@ export default function SemesterStudyHub() {
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [showCourseSearchModal, setShowCourseSearchModal] = useState(false);
   const [showReviewSearchModal, setShowReviewSearchModal] = useState(false);
+  const [showStatusHistoryModal, setShowStatusHistoryModal] = useState(false);
+  const [selectedStatusHistoryWeekNumber, setSelectedStatusHistoryWeekNumber] = useState(null);
   const [activeCourseDetailPanel, setActiveCourseDetailPanel] = useState(null);
   const [activeReviewDetailPanel, setActiveReviewDetailPanel] = useState(null);
   const [editingCourseId, setEditingCourseId] = useState(null);
@@ -1403,6 +1405,7 @@ export default function SemesterStudyHub() {
   const didInitHistoryRef = useRef(false);
   const suppressHistoryPushRef = useRef(false);
   const currentWeekNumber = useMemo(() => getCurrentWeekNumber(new Date(currentDateTick)), [currentDateTick]);
+  const previousWeekNumber = currentWeekNumber > 1 ? currentWeekNumber - 1 : null;
   const currentWeekLabel = TERM_WEEKS[currentWeekNumber - 1]?.label || "";
   const historyState = useMemo(
     () => ({
@@ -1664,6 +1667,10 @@ export default function SemesterStudyHub() {
     }
     if (page !== "reviewDetail") {
       setActiveReviewDetailPanel(null);
+    }
+    if (page !== "status") {
+      setShowStatusHistoryModal(false);
+      setSelectedStatusHistoryWeekNumber(null);
     }
   }, [page, selectedCourseId, selectedReviewId]);
 
@@ -2294,6 +2301,43 @@ export default function SemesterStudyHub() {
     () => activeCourses.map((course) => ({ ...course, currentRecord: findWeeklyRecord(course, currentWeekNumber) })),
     [activeCourses, currentWeekNumber]
   );
+  const statusHistoryWeeks = useMemo(
+    () =>
+      TERM_WEEKS.filter((week) => week.weekNumber < currentWeekNumber)
+        .map((week) => {
+          const completedCount = activeCourses.filter((course) => {
+            const record = findWeeklyRecord(course, week.weekNumber);
+            return record?.lectureDone && record?.homeworkDone;
+          }).length;
+
+          return {
+            ...week,
+            completedCount,
+            pendingCount: Math.max(activeCourses.length - completedCount, 0),
+          };
+        })
+        .reverse(),
+    [activeCourses, currentWeekNumber]
+  );
+  const selectedStatusHistoryWeek = useMemo(
+    () => statusHistoryWeeks.find((week) => week.weekNumber === selectedStatusHistoryWeekNumber) || null,
+    [selectedStatusHistoryWeekNumber, statusHistoryWeeks]
+  );
+  const statusHistoryRows = useMemo(
+    () =>
+      selectedStatusHistoryWeekNumber
+        ? activeCourses.map((course) => ({
+            ...course,
+            historyRecord: findWeeklyRecord(course, selectedStatusHistoryWeekNumber),
+          }))
+        : [],
+    [activeCourses, selectedStatusHistoryWeekNumber]
+  );
+  useEffect(() => {
+    if (selectedStatusHistoryWeekNumber && !statusHistoryWeeks.some((week) => week.weekNumber === selectedStatusHistoryWeekNumber)) {
+      setSelectedStatusHistoryWeekNumber(null);
+    }
+  }, [selectedStatusHistoryWeekNumber, statusHistoryWeeks]);
   const reviewOverviewRows = useMemo(
     () => activeReviewItems.map((item) => ({ ...item, progress: calcReviewProgress(item) })),
     [activeReviewItems]
@@ -2399,6 +2443,28 @@ export default function SemesterStudyHub() {
   function discardAllStatusChanges() {
     discardStatusChanges();
     discardReviewStatusChanges();
+  }
+
+  function openStatusHistoryModalPanel() {
+    setShowStatusHistoryModal(true);
+  }
+
+  function closeStatusHistoryModalPanel() {
+    setShowStatusHistoryModal(false);
+  }
+
+  function openStatusHistoryWeekDetail(weekNumber) {
+    setSelectedStatusHistoryWeekNumber(weekNumber);
+    setShowStatusHistoryModal(false);
+  }
+
+  function closeStatusHistoryWeekDetail() {
+    setSelectedStatusHistoryWeekNumber(null);
+  }
+
+  function reopenStatusHistoryWeekList() {
+    closeStatusHistoryWeekDetail();
+    openStatusHistoryModalPanel();
   }
 
   async function saveStatusChanges(showMessage = true) {
@@ -3854,8 +3920,20 @@ export default function SemesterStudyHub() {
 
         {!isBootstrapping && page === "status" ? (
           <SectionCard
-            title="课程状态"
-            subtitle={`当前周：${currentWeekLabel}。这里集中展示课程本周的完成情况。${hasUnsavedCourseStatusChanges ? ` 当前还有 ${statusDraftSummary.fieldCount} 项课程状态修改未保存。` : ""}`}
+            title={
+              <span className="inline-flex flex-wrap items-center gap-3">
+                <span>课程状态</span>
+                <MotionButton
+                  onClick={openStatusHistoryModalPanel}
+                  disabled={!previousWeekNumber}
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <CalendarDays className="h-4 w-4" />
+                  查看过往周
+                </MotionButton>
+              </span>
+            }
+            subtitle={`当前周：${currentWeekLabel}。你可以在这里修改本周状态，也可以通过“查看过往周”进入历史周次的浮层。${hasUnsavedCourseStatusChanges ? ` 当前还有 ${statusDraftSummary.fieldCount} 项课程状态修改未保存。` : ""}`}
             right={
               <StatusActionBar
                 hasUnsavedStatusChanges={hasUnsavedCourseStatusChanges}
@@ -4794,6 +4872,117 @@ export default function SemesterStudyHub() {
             </MotionButton>
           </div>
         </div>
+      </Modal>
+      <Modal open={showStatusHistoryModal} onClose={closeStatusHistoryModalPanel} title="过往周状态" panelClassName="max-w-4xl">
+        <div className="space-y-4">
+          <p className="text-sm leading-6 text-zinc-500">点击任意周次后，会打开对应周的课程状态浮层。你可以在那里继续查看并修改那一周的上课和作业完成情况。</p>
+          {statusHistoryWeeks.length ? (
+            <div className="space-y-3">
+              {statusHistoryWeeks.map((week) => (
+                <MotionButton
+                  key={week.weekNumber}
+                  onClick={() => openStatusHistoryWeekDetail(week.weekNumber)}
+                  className="w-full rounded-3xl border border-zinc-200 bg-zinc-50 p-4 text-left hover:border-zinc-300 hover:bg-white"
+                >
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="text-base font-semibold text-zinc-900">{week.label}</div>
+                      <div className="mt-1 text-sm text-zinc-500">点击查看这周每门课程的状态详情。</div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs sm:justify-end">
+                      <span className="rounded-full bg-emerald-100 px-3 py-2 font-medium text-emerald-700">已完成 {week.completedCount} 门</span>
+                      <span className="rounded-full bg-amber-100 px-3 py-2 font-medium text-amber-700">待完成 {week.pendingCount} 门</span>
+                      <span className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-2 font-medium text-zinc-600 ring-1 ring-zinc-200">
+                        进入详情
+                        <ChevronDown className="h-4 w-4 -rotate-90 text-zinc-400" />
+                      </span>
+                    </div>
+                  </div>
+                </MotionButton>
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="还没有过往周" description="当前还是第一周，后续周次产生之后，这里会自动列出可回看的历史周。" />
+          )}
+        </div>
+      </Modal>
+      <Modal
+        open={Boolean(selectedStatusHistoryWeek)}
+        onClose={reopenStatusHistoryWeekList}
+        title={selectedStatusHistoryWeek ? `${selectedStatusHistoryWeek.label} · 课程状态` : "历史周状态"}
+        panelClassName="max-w-5xl"
+      >
+        {selectedStatusHistoryWeek ? (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <p className="text-sm leading-6 text-zinc-500">这里保存了该周所有课程的状态。修改后和主页面共用同一套保存草稿，不会丢。</p>
+              <div className="flex flex-col items-stretch gap-2 sm:items-end">
+                <MotionButton
+                  onClick={reopenStatusHistoryWeekList}
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  返回周列表
+                </MotionButton>
+                <StatusActionBar
+                  hasUnsavedStatusChanges={hasUnsavedCourseStatusChanges}
+                  changedCount={statusDraftSummary.fieldCount}
+                  onDiscard={discardStatusChanges}
+                  onSave={saveStatusChanges}
+                />
+              </div>
+            </div>
+            {statusHistoryRows.length ? (
+              <div className="overflow-x-auto">
+                <table className="min-w-full border-separate border-spacing-y-3">
+                  <thead>
+                    <tr className="text-left text-sm text-zinc-500">
+                      <th className="px-3">课程</th>
+                      <th className="px-3">时间</th>
+                      <th className="px-3">Vorlesung</th>
+                      <th className="px-3">Hausaufgabe</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {statusHistoryRows.map((course) => {
+                      const lectureDone = Boolean(course.historyRecord?.lectureDone);
+                      const homeworkDone = Boolean(course.historyRecord?.homeworkDone);
+                      return (
+                        <tr key={course.id} className="bg-zinc-50 text-sm shadow-sm">
+                          <td className="rounded-l-3xl px-3 py-4 align-middle">
+                            <div className="font-semibold text-zinc-900">{course.name}</div>
+                            <div className="mt-1 text-xs text-zinc-500">{course.kind}</div>
+                          </td>
+                          <td className="px-3 py-4 align-middle text-zinc-600">
+                            <div>{getEntityScheduleLabel(course) || "时间待定"}</div>
+                          </td>
+                          <td className="px-3 py-4 align-middle">
+                            <StatusPill
+                              done={lectureDone}
+                              doneLabel="已上"
+                              todoLabel="未上"
+                              onClick={() => toggleWeeklyField(course.id, selectedStatusHistoryWeek.weekNumber, "lectureDone")}
+                            />
+                          </td>
+                          <td className="rounded-r-3xl px-3 py-4 align-middle">
+                            <StatusPill
+                              done={homeworkDone}
+                              doneLabel="已写"
+                              todoLabel="未写"
+                              onClick={() => toggleWeeklyField(course.id, selectedStatusHistoryWeek.weekNumber, "homeworkDone")}
+                            />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState title="这周还没有课程状态" description="当前没有可展示的课程记录，请先确认课程数据是否已初始化。" />
+            )}
+          </div>
+        ) : null}
       </Modal>
       <Modal open={Boolean(confirmState)} onClose={() => setConfirmState(null)} title={confirmState?.title || "确认操作"}>
         <div className="space-y-5">
