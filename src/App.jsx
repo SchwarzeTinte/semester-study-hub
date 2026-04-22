@@ -655,7 +655,6 @@ function buildCourseWeeklyRows(courseId, weeklyRecords = []) {
   return TERM_WEEKS.map((week) => {
     const record = weeklyMap.get(week.weekNumber);
     return {
-      ...(isUuid(record?.id) ? { id: record.id } : {}),
       course_id: courseId,
       week_number: week.weekNumber,
       label: week.label,
@@ -670,7 +669,6 @@ function buildReviewWeeklyRows(reviewId, weeklyRecords = []) {
   return TERM_WEEKS.map((week) => {
     const record = weeklyMap.get(week.weekNumber);
     return {
-      ...(isUuid(record?.id) ? { id: record.id } : {}),
       review_id: reviewId,
       week_number: week.weekNumber,
       label: week.label,
