@@ -29,6 +29,8 @@ const REVIEW_STORAGE_KEY = "semester-review-hub-v1";
 const LEGACY_KEYS = ["semester-study-hub-v2", "semester-study-hub-v1"];
 const DB_NAME = "semester-study-hub-db";
 const STORE_NAME = "course-files";
+const AUTH_EMAIL_DOMAIN = "users.semester-study-hub.local";
+const USERNAME_REGEX = /^[a-z0-9](?:[a-z0-9_.-]{2,31})$/;
 const TERM_START = "2026-04-13";
 const TERM_END = "2026-07-17";
 const DAY_ORDER = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"];
@@ -77,6 +79,22 @@ function uid() {
 
 function classNames(...arr) {
   return arr.filter(Boolean).join(" ");
+}
+
+function normalizeUsernameInput(value = "") {
+  return value.trim().toLowerCase();
+}
+
+function usernameToAuthEmail(username = "") {
+  return `${normalizeUsernameInput(username)}@${AUTH_EMAIL_DOMAIN}`;
+}
+
+function authEmailToUsername(email = "") {
+  return email.split("@")[0] || "";
+}
+
+function getScopedStorageKey(baseKey, scope = "") {
+  return scope ? `${baseKey}:${scope}` : baseKey;
 }
 
 function normalizeWeekdays(value) {
@@ -499,9 +517,13 @@ function groupFiles(files = []) {
   }));
 }
 
-function readLocalCoursesFromStorage() {
+function readLocalCoursesFromStorage(scope = "") {
   try {
-    const sources = [localStorage.getItem(STORAGE_KEY), ...LEGACY_KEYS.map((key) => localStorage.getItem(key))].filter(Boolean);
+    const sources = [
+      localStorage.getItem(getScopedStorageKey(STORAGE_KEY, scope)),
+      ...LEGACY_KEYS.map((key) => localStorage.getItem(getScopedStorageKey(key, scope))),
+      ...(!scope ? [] : [localStorage.getItem(STORAGE_KEY), ...LEGACY_KEYS.map((key) => localStorage.getItem(key))]),
+    ].filter(Boolean);
     const source = sources[0];
     if (!source) return [];
     const parsed = JSON.parse(source);
@@ -511,9 +533,9 @@ function readLocalCoursesFromStorage() {
   }
 }
 
-function readLocalReviewsFromStorage() {
+function readLocalReviewsFromStorage(scope = "") {
   try {
-    const source = localStorage.getItem(REVIEW_STORAGE_KEY);
+    const source = localStorage.getItem(getScopedStorageKey(REVIEW_STORAGE_KEY, scope)) || (!scope ? null : localStorage.getItem(REVIEW_STORAGE_KEY));
     if (!source) return [];
     const parsed = JSON.parse(source);
     return Array.isArray(parsed) ? parsed.map(normalizeReviewItem).filter(Boolean) : [];
@@ -594,10 +616,11 @@ function buildReviewFileMetaFromRow(row) {
   };
 }
 
-function buildCourseRowPayload(course) {
+function buildCourseRowPayload(course, userId = "") {
   const scheduleEntries = normalizeScheduleEntries(course.scheduleEntries, course.weekdays ?? course.weekday, course.time || "");
   return {
     ...(isUuid(course.id) ? { id: course.id } : {}),
+    ...(userId ? { user_id: userId } : {}),
     name: course.name || "",
     teacher: course.teacher || "",
     kind: course.kind || "Vorlesung",
@@ -610,10 +633,11 @@ function buildCourseRowPayload(course) {
   };
 }
 
-function buildReviewRowPayload(item) {
+function buildReviewRowPayload(item, userId = "") {
   const scheduleEntries = normalizeScheduleEntries(item.scheduleEntries, item.weekdays ?? item.weekday, item.time || "");
   return {
     ...(isUuid(item.id) ? { id: item.id } : {}),
+    ...(userId ? { user_id: userId } : {}),
     name: item.name || "",
     subject: item.subject || "",
     source_course_id: isUuid(item.sourceCourseId) ? item.sourceCourseId : null,
@@ -746,9 +770,9 @@ function dedupeReviews(items = []) {
   return Array.from(byKey.values());
 }
 
-async function saveCourseToSupabaseRecord(course) {
+async function saveCourseToSupabaseRecord(course, userId = "") {
   if (!supabase) return course;
-  let payload = buildCourseRowPayload(course);
+  let payload = buildCourseRowPayload(course, userId);
 
   if (!isUuid(course.id)) {
     const { data: existingRows, error: findError } = await supabase
@@ -794,9 +818,9 @@ async function saveCourseToSupabaseRecord(course) {
   return hydrateCourseFromRemote(courseRow, weeklyRows || [], course.files || []);
 }
 
-async function saveReviewToSupabaseRecord(item) {
+async function saveReviewToSupabaseRecord(item, userId = "") {
   if (!supabase) return item;
-  let payload = buildReviewRowPayload(item);
+  let payload = buildReviewRowPayload(item, userId);
 
   if (!isUuid(item.id)) {
     const { data: existingRows, error: findError } = await supabase
@@ -1301,7 +1325,32 @@ function ReviewFileSection({ title, files, busyFileId, onOpen, onDownload, onTog
 
 function FileCoverThumbnail({ file, className = "" }) {
   const isImage = (file?.mime || "").startsWith("image/");
-  const imageUrl = isImage ? getStoragePublicUrl(file?.storagePath || "") : "";
+  const [imageUrl, setImageUrl] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const storagePath = file?.storagePath || "";
+
+    if (!isImage || !storagePath) {
+      setImageUrl("");
+      return undefined;
+    }
+    if (!isSupabaseConfigured || !supabase) {
+      setImageUrl(getStoragePublicUrl(storagePath));
+      return undefined;
+    }
+
+    setImageUrl("");
+
+    supabase.storage.from(STORAGE_BUCKET).createSignedUrl(storagePath, 3600).then(({ data, error }) => {
+      if (!active || error) return;
+      setImageUrl(data?.signedUrl || "");
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [file?.storagePath, isImage]);
 
   if (imageUrl) {
     return <img src={imageUrl} alt={file?.name || "文件封面"} className={classNames("h-20 w-16 rounded-2xl border border-zinc-200 object-cover", className)} />;
@@ -1342,9 +1391,120 @@ function StatusActionBar({ hasUnsavedStatusChanges, changedCount, onDiscard, onS
   );
 }
 
+function AuthScreen({ mode, form, error, info, busy, onChange, onSubmit, onSwitchMode }) {
+  const isRegister = mode === "register";
+
+  return (
+    <div className="min-h-screen bg-zinc-100 px-4 py-10 text-zinc-900">
+      <div className="mx-auto max-w-5xl">
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1.2fr)_420px]">
+          <div className="rounded-[2rem] border border-zinc-200 bg-white p-8 shadow-sm">
+            <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-600">
+              <GraduationCap className="h-3.5 w-3.5" />
+              Semester Study Hub
+            </div>
+            <h1 className="text-4xl font-semibold tracking-tight text-zinc-950">课程与复习按账号独立保存</h1>
+            <p className="mt-4 max-w-2xl text-sm leading-7 text-zinc-500">
+              注册或登录后，每个用户都会拥有自己的课程、复习、每周状态和文件记录。不同账号之间的数据不会混在一起。
+            </p>
+            <div className="mt-8 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
+                <div className="text-sm font-semibold text-zinc-900">账号登录</div>
+                <div className="mt-2 text-sm leading-6 text-zinc-500">使用账户名和密码进入自己的学习空间。</div>
+              </div>
+              <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
+                <div className="text-sm font-semibold text-zinc-900">数据隔离</div>
+                <div className="mt-2 text-sm leading-6 text-zinc-500">课程、复习和文件都只属于当前登录用户。</div>
+              </div>
+              <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
+                <div className="text-sm font-semibold text-zinc-900">持续同步</div>
+                <div className="mt-2 text-sm leading-6 text-zinc-500">登录后继续使用现有 Supabase 云端同步流程。</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm">
+            <div className="mb-6">
+              <h2 className="text-2xl font-semibold text-zinc-950">{isRegister ? "注册账号" : "登录账号"}</h2>
+              <p className="mt-2 text-sm leading-6 text-zinc-500">{isRegister ? "创建新用户后，就会自动拥有独立的数据空间。" : "输入账户名和密码，进入你自己的课程数据。"}</p>
+            </div>
+
+            <form className="space-y-4" onSubmit={onSubmit}>
+              <label className="block">
+                <div className="mb-2 text-sm font-medium text-zinc-700">账户名</div>
+                <input
+                  value={form.username}
+                  onChange={(event) => onChange("username", event.target.value)}
+                  placeholder="例如：alice_01"
+                  autoComplete="username"
+                  className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                />
+                <div className="mt-2 text-xs text-zinc-500">支持小写字母、数字、下划线、点和连字符，长度 3-32 位。</div>
+              </label>
+
+              <label className="block">
+                <div className="mb-2 text-sm font-medium text-zinc-700">密码</div>
+                <input
+                  type="password"
+                  value={form.password}
+                  onChange={(event) => onChange("password", event.target.value)}
+                  placeholder="至少 6 位"
+                  autoComplete={isRegister ? "new-password" : "current-password"}
+                  className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                />
+              </label>
+
+              {isRegister ? (
+                <label className="block">
+                  <div className="mb-2 text-sm font-medium text-zinc-700">确认密码</div>
+                  <input
+                    type="password"
+                    value={form.confirmPassword}
+                    onChange={(event) => onChange("confirmPassword", event.target.value)}
+                    placeholder="再次输入密码"
+                    autoComplete="new-password"
+                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                  />
+                </label>
+              ) : null}
+
+              {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
+              {info ? <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{info}</div> : null}
+
+              <div className="flex flex-col gap-3 pt-2 sm:flex-row">
+                <MotionButton
+                  type="submit"
+                  disabled={busy}
+                  className="inline-flex flex-1 items-center justify-center rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+                >
+                  {busy ? "提交中..." : isRegister ? "注册并进入" : "登录"}
+                </MotionButton>
+                <MotionButton
+                  type="button"
+                  onClick={onSwitchMode}
+                  className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                >
+                  {isRegister ? "去登录" : "去注册"}
+                </MotionButton>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function SemesterStudyHub() {
   const [courses, setCourses] = useState([]);
   const [reviews, setReviews] = useState([]);
+  const [session, setSession] = useState(null);
+  const [authResolved, setAuthResolved] = useState(!isSupabaseConfigured);
+  const [authMode, setAuthMode] = useState("login");
+  const [authForm, setAuthForm] = useState({ username: "", password: "", confirmPassword: "" });
+  const [authError, setAuthError] = useState("");
+  const [authInfo, setAuthInfo] = useState("");
+  const [authSubmitting, setAuthSubmitting] = useState(false);
   const [selectedCourseId, setSelectedCourseId] = useState(null);
   const [selectedReviewId, setSelectedReviewId] = useState(null);
   const [query, setQuery] = useState("");
@@ -1400,10 +1560,17 @@ export default function SemesterStudyHub() {
   const fileDragDepthRef = useRef(0);
   const reviewFileInputRef = useRef(null);
   const reviewFileDragDepthRef = useRef(0);
-  const bootstrapStartedRef = useRef(false);
-  const legacyFileMigrationStartedRef = useRef(false);
+  const bootstrapStartedRef = useRef("");
+  const legacyFileMigrationStartedRef = useRef("");
   const didInitHistoryRef = useRef(false);
   const suppressHistoryPushRef = useRef(false);
+  const currentUser = session?.user || null;
+  const currentUserId = currentUser?.id || "";
+  const currentUsername = currentUser?.user_metadata?.username || authEmailToUsername(currentUser?.email || "");
+  const storageScope = isSupabaseConfigured ? currentUserId : "";
+  const courseStorageKey = useMemo(() => getScopedStorageKey(STORAGE_KEY, storageScope), [storageScope]);
+  const reviewStorageKey = useMemo(() => getScopedStorageKey(REVIEW_STORAGE_KEY, storageScope), [storageScope]);
+  const buildOwnedStoragePath = (kind, entityId, fileId, fileName) => `${currentUserId}/${kind}/${entityId}/${fileId}-${sanitizeFileName(fileName)}`;
   const currentWeekNumber = useMemo(() => getCurrentWeekNumber(new Date(currentDateTick)), [currentDateTick]);
   const previousWeekNumber = currentWeekNumber > 1 ? currentWeekNumber - 1 : null;
   const currentWeekLabel = TERM_WEEKS[currentWeekNumber - 1]?.label || "";
@@ -1417,13 +1584,44 @@ export default function SemesterStudyHub() {
   );
 
   useEffect(() => {
-    if (bootstrapStartedRef.current) return undefined;
-    bootstrapStartedRef.current = true;
+    if (!isSupabaseConfigured || !supabase) return undefined;
+
+    let active = true;
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!active) return;
+      if (error) {
+        console.error("Failed to restore auth session.", error);
+      }
+      setSession(data?.session || null);
+      setAuthResolved(true);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession || null);
+      setAuthResolved(true);
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isSupabaseConfigured && !authResolved) return undefined;
+
+    const bootstrapKey = isSupabaseConfigured ? currentUserId || "anonymous" : "local-mode";
+    if (bootstrapStartedRef.current === bootstrapKey) return undefined;
+    bootstrapStartedRef.current = bootstrapKey;
+    setIsBootstrapping(true);
+    let cancelled = false;
 
     async function saveCourseToSupabase(course) {
       const { data: courseRow, error: courseError } = await supabase
         .from("courses")
-        .upsert(buildCourseRowPayload(course))
+        .upsert(buildCourseRowPayload(course, currentUserId))
         .select("*")
         .single();
       if (courseError) throw courseError;
@@ -1445,7 +1643,7 @@ export default function SemesterStudyHub() {
     async function saveReviewToSupabase(item) {
       const { data: reviewRow, error: reviewError } = await supabase
         .from("reviews")
-        .upsert(buildReviewRowPayload(item))
+        .upsert(buildReviewRowPayload(item, currentUserId))
         .select("*")
         .single();
       if (reviewError) throw reviewError;
@@ -1545,8 +1743,8 @@ export default function SemesterStudyHub() {
     }
 
     async function bootstrapData() {
-      const localCourses = readLocalCoursesFromStorage();
-      const localReviews = readLocalReviewsFromStorage();
+      const localCourses = readLocalCoursesFromStorage(storageScope);
+      const localReviews = readLocalReviewsFromStorage(storageScope);
 
       if (!isSupabaseConfigured || !supabase) {
         if (!cancelled) {
@@ -1554,6 +1752,13 @@ export default function SemesterStudyHub() {
           setReviews(localReviews);
           setIsBootstrapping(false);
         }
+        return;
+      }
+
+      if (!currentUserId) {
+        setCourses([]);
+        setReviews([]);
+        setIsBootstrapping(false);
         return;
       }
 
@@ -1593,8 +1798,8 @@ export default function SemesterStudyHub() {
           );
           const mergedCourses = dedupeCourses([...remoteData.courses, ...migratedData.courses]);
           const mergedReviews = dedupeReviews([...remoteData.reviews, ...migratedData.reviews]);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(mergedCourses));
-          localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(mergedReviews));
+          localStorage.setItem(courseStorageKey, JSON.stringify(mergedCourses));
+          localStorage.setItem(reviewStorageKey, JSON.stringify(mergedReviews));
           setCourses(mergedCourses);
           setReviews(mergedReviews);
           setToastMessage("已补充同步本地新增课程与复习到云端。");
@@ -1615,8 +1820,8 @@ export default function SemesterStudyHub() {
             12000,
             "本地数据迁移到云端超时"
           );
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(migratedData.courses));
-          localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(migratedData.reviews));
+          localStorage.setItem(courseStorageKey, JSON.stringify(migratedData.courses));
+          localStorage.setItem(reviewStorageKey, JSON.stringify(migratedData.reviews));
           setCourses(migratedData.courses);
           setReviews(migratedData.reviews);
           setToastMessage("已把本地课程与复习数据迁移到云端。");
@@ -1634,8 +1839,8 @@ export default function SemesterStudyHub() {
             )
           );
         }
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(starterCourses));
-        localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify([]));
+        localStorage.setItem(courseStorageKey, JSON.stringify(starterCourses));
+        localStorage.setItem(reviewStorageKey, JSON.stringify([]));
         setCourses(starterCourses);
         setReviews([]);
         setToastMessage("已初始化云端课程数据。");
@@ -1650,16 +1855,20 @@ export default function SemesterStudyHub() {
     }
 
     bootstrapData();
-    return undefined;
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [authResolved, courseStorageKey, currentUserId, reviewStorageKey, storageScope]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(courses));
-  }, [courses]);
+    if (isSupabaseConfigured && !currentUserId) return;
+    localStorage.setItem(courseStorageKey, JSON.stringify(courses));
+  }, [courseStorageKey, courses, currentUserId]);
 
   useEffect(() => {
-    localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(reviews));
-  }, [reviews]);
+    if (isSupabaseConfigured && !currentUserId) return;
+    localStorage.setItem(reviewStorageKey, JSON.stringify(reviews));
+  }, [currentUserId, reviewStorageKey, reviews]);
 
   useEffect(() => {
     if (page !== "courseDetail") {
@@ -1679,11 +1888,12 @@ export default function SemesterStudyHub() {
   }, [selectedCourseId]);
 
   useEffect(() => {
-    if (legacyFileMigrationStartedRef.current || isBootstrapping) return undefined;
-    legacyFileMigrationStartedRef.current = true;
+    const migrationKey = isSupabaseConfigured ? currentUserId || "anonymous" : "local-mode";
+    if (legacyFileMigrationStartedRef.current === migrationKey || isBootstrapping) return undefined;
+    legacyFileMigrationStartedRef.current = migrationKey;
 
     async function migrateLegacyFilesToSupabase() {
-      if (!isSupabaseConfigured || !supabase || isBootstrapping || isMigratingLegacyFiles) return;
+      if (!isSupabaseConfigured || !supabase || !currentUserId || isBootstrapping || isMigratingLegacyFiles) return;
 
       const hasLegacyCourseFiles = courses.some((course) => (course.files || []).some((file) => !file.storagePath));
       const hasLegacyReviewFiles = reviews.some((item) => (item.files || []).some((file) => !file.storagePath));
@@ -1709,7 +1919,7 @@ export default function SemesterStudyHub() {
             }
 
             const nextId = crypto.randomUUID();
-            const storagePath = `courses/${course.id}/${nextId}-${sanitizeFileName(file.name)}`;
+            const storagePath = buildOwnedStoragePath("courses", course.id, nextId, file.name);
             const blob = new Blob([record.blob], { type: file.mime || record.mime || "application/octet-stream" });
             const { error: uploadError } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, blob, {
               upsert: true,
@@ -1718,6 +1928,7 @@ export default function SemesterStudyHub() {
             if (uploadError) throw uploadError;
 
             const { error: insertError } = await supabase.from("course_files").insert({
+              user_id: currentUserId,
               id: nextId,
               course_id: course.id,
               name: file.name,
@@ -1761,7 +1972,7 @@ export default function SemesterStudyHub() {
             }
 
             const nextId = crypto.randomUUID();
-            const storagePath = `reviews/${item.id}/${nextId}-${sanitizeFileName(file.name)}`;
+            const storagePath = buildOwnedStoragePath("reviews", item.id, nextId, file.name);
             const blob = new Blob([record.blob], { type: file.mime || record.mime || "application/octet-stream" });
             const { error: uploadError } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, blob, {
               upsert: true,
@@ -1771,6 +1982,7 @@ export default function SemesterStudyHub() {
 
             const remappedSourceFileId = courseFileIdMap.get(file.sourceFileId) || (isUuid(file.sourceFileId) ? file.sourceFileId : null);
             const { error: insertError } = await supabase.from("review_files").insert({
+              user_id: currentUserId,
               id: nextId,
               review_id: item.id,
               source_file_id: remappedSourceFileId,
@@ -1807,7 +2019,7 @@ export default function SemesterStudyHub() {
 
     migrateLegacyFilesToSupabase();
     return undefined;
-  }, [courses, reviews, isBootstrapping, isMigratingLegacyFiles]);
+  }, [courses, currentUserId, isBootstrapping, isMigratingLegacyFiles, reviews]);
 
   useEffect(() => {
     if (!toastMessage) return undefined;
@@ -2375,7 +2587,7 @@ export default function SemesterStudyHub() {
     try {
       const savedCourses = [];
       for (const course of nextCourses) {
-        savedCourses.push(await saveCourseToSupabaseRecord(course));
+        savedCourses.push(await saveCourseToSupabaseRecord(course, currentUserId));
       }
       if (deletedCourseIds.length) {
         const remoteIds = deletedCourseIds.filter(isUuid);
@@ -2400,7 +2612,7 @@ export default function SemesterStudyHub() {
     try {
       const savedReviews = [];
       for (const item of nextReviews) {
-        savedReviews.push(await saveReviewToSupabaseRecord(item));
+        savedReviews.push(await saveReviewToSupabaseRecord(item, currentUserId));
       }
       if (deletedReviewIds.length) {
         const remoteIds = deletedReviewIds.filter(isUuid);
@@ -2430,6 +2642,108 @@ export default function SemesterStudyHub() {
 
   function showToast(message) {
     setToastMessage(message);
+  }
+
+  function updateAuthForm(field, value) {
+    setAuthForm((prev) => ({ ...prev, [field]: value }));
+    if (authError) setAuthError("");
+    if (authInfo) setAuthInfo("");
+  }
+
+  function toggleAuthMode() {
+    setAuthMode((prev) => (prev === "login" ? "register" : "login"));
+    setAuthError("");
+    setAuthInfo("");
+  }
+
+  async function handleAuthSubmit(event) {
+    event.preventDefault();
+    if (!supabase) {
+      setAuthError("当前还没有配置 Supabase，暂时无法使用账户系统。");
+      return;
+    }
+
+    const username = normalizeUsernameInput(authForm.username);
+    const password = authForm.password;
+    const confirmPassword = authForm.confirmPassword;
+    const isRegister = authMode === "register";
+
+    if (!USERNAME_REGEX.test(username)) {
+      setAuthError("账户名格式不正确，请使用 3-32 位小写字母、数字、下划线、点或连字符。");
+      return;
+    }
+    if (password.length < 6) {
+      setAuthError("密码至少需要 6 位。");
+      return;
+    }
+    if (isRegister && password !== confirmPassword) {
+      setAuthError("两次输入的密码不一致。");
+      return;
+    }
+
+    setAuthSubmitting(true);
+    setAuthError("");
+    setAuthInfo("");
+
+    try {
+      const email = usernameToAuthEmail(username);
+      if (isRegister) {
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: { username },
+          },
+        });
+        if (error) throw error;
+
+        setAuthForm({ username: "", password: "", confirmPassword: "" });
+        if (data?.session) {
+          setAuthInfo("注册成功，已自动登录。");
+        } else {
+          setAuthMode("login");
+          setAuthInfo("注册成功。若后续无法登录，请在 Supabase Auth 设置里关闭邮件确认，因为这里使用的是账户名映射登录。");
+        }
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+        if (error) throw error;
+        setAuthForm({ username: "", password: "", confirmPassword: "" });
+      }
+    } catch (error) {
+      const message = error?.message || "";
+      if (/invalid login credentials/i.test(message)) {
+        setAuthError("账户名或密码不正确。");
+      } else if (/user already registered/i.test(message) || /already been registered/i.test(message)) {
+        setAuthError("这个账户名已经被注册了。");
+      } else if (/password/i.test(message) && /6/i.test(message)) {
+        setAuthError("密码至少需要 6 位。");
+      } else {
+        setAuthError(message || "认证失败，请稍后再试。");
+      }
+    } finally {
+      setAuthSubmitting(false);
+    }
+  }
+
+  async function logoutUser() {
+    if (!supabase) return;
+    try {
+      await supabase.auth.signOut();
+      setCourses([]);
+      setReviews([]);
+      setPage("overview");
+      setSelectedCourseId(null);
+      setSelectedReviewId(null);
+      setStatusDrafts({});
+      setReviewStatusDrafts({});
+      setToastMessage("");
+    } catch (error) {
+      console.error("Failed to sign out.", error);
+      window.alert("退出登录失败。");
+    }
   }
 
   function discardStatusChanges() {
@@ -2804,10 +3118,11 @@ export default function SemesterStudyHub() {
       if (sourceFile.storagePath && isSupabaseConfigured && supabase) {
         const nextId = crypto.randomUUID();
         const uploadedAt = sourceFile.uploadedAt || new Date().toISOString();
-        const targetPath = `reviews/${reviewId}/${nextId}-${sanitizeFileName(sourceFile.name)}`;
+        const targetPath = buildOwnedStoragePath("reviews", reviewId, nextId, sourceFile.name);
         const { error: copyError } = await supabase.storage.from(STORAGE_BUCKET).copy(sourceFile.storagePath, targetPath);
         if (copyError) throw copyError;
         const { error: insertError } = await supabase.from("review_files").insert({
+          user_id: currentUserId,
           id: nextId,
           review_id: reviewId,
           source_file_id: isUuid(sourceFile.id) ? sourceFile.id : null,
@@ -2937,10 +3252,11 @@ export default function SemesterStudyHub() {
         let storagePath = "";
 
         if (isSupabaseConfigured && supabase) {
-          storagePath = `courses/${targetCourse.id}/${id}-${sanitizeFileName(file.name)}`;
+          storagePath = buildOwnedStoragePath("courses", targetCourse.id, id, file.name);
           const { error: uploadError } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, file, { upsert: true });
           if (uploadError) throw uploadError;
           const { error: insertError } = await supabase.from("course_files").insert({
+            user_id: currentUserId,
             id,
             course_id: targetCourse.id,
             name: file.name,
@@ -2978,10 +3294,11 @@ export default function SemesterStudyHub() {
           let reviewStoragePath = "";
 
           if (isSupabaseConfigured && supabase) {
-            reviewStoragePath = `reviews/${reviewItem.id}/${reviewFileId}-${sanitizeFileName(file.name)}`;
+            reviewStoragePath = buildOwnedStoragePath("reviews", reviewItem.id, reviewFileId, file.name);
             const { error: copyError } = await supabase.storage.from(STORAGE_BUCKET).copy(storagePath, reviewStoragePath);
             if (copyError) throw copyError;
             const { error: insertReviewFileError } = await supabase.from("review_files").insert({
+              user_id: currentUserId,
               id: reviewFileId,
               review_id: reviewItem.id,
               source_file_id: id,
@@ -3061,10 +3378,11 @@ export default function SemesterStudyHub() {
         let storagePath = "";
 
         if (isSupabaseConfigured && supabase) {
-          storagePath = `reviews/${targetItem.id}/${id}-${sanitizeFileName(file.name)}`;
+          storagePath = buildOwnedStoragePath("reviews", targetItem.id, id, file.name);
           const { error: uploadError } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, file, { upsert: true });
           if (uploadError) throw uploadError;
           const { error: insertError } = await supabase.from("review_files").insert({
+            user_id: currentUserId,
             id,
             review_id: targetItem.id,
             source_file_id: null,
@@ -3722,10 +4040,11 @@ export default function SemesterStudyHub() {
       for (const sourceFile of missingCourseFiles) {
         if (sourceFile.storagePath && isSupabaseConfigured && supabase) {
           const nextId = crypto.randomUUID();
-          const targetPath = `reviews/${reviewId}/${nextId}-${sanitizeFileName(sourceFile.name)}`;
+          const targetPath = buildOwnedStoragePath("reviews", reviewId, nextId, sourceFile.name);
           const { error: copyError } = await supabase.storage.from(STORAGE_BUCKET).copy(sourceFile.storagePath, targetPath);
           if (copyError) throw copyError;
           const { error: insertError } = await supabase.from("review_files").insert({
+            user_id: currentUserId,
             id: nextId,
             review_id: reviewId,
             source_file_id: isUuid(sourceFile.id) ? sourceFile.id : null,
@@ -3802,6 +4121,32 @@ export default function SemesterStudyHub() {
     });
   }
 
+  if (isSupabaseConfigured && !authResolved) {
+    return (
+      <div className="min-h-screen bg-zinc-100 px-4 py-10 text-zinc-900">
+        <div className="mx-auto max-w-3xl rounded-[2rem] border border-zinc-200 bg-white p-8 shadow-sm">
+          <div className="text-xl font-semibold text-zinc-950">正在检查登录状态</div>
+          <div className="mt-3 text-sm leading-6 text-zinc-500">请稍等，系统正在恢复当前账号会话并准备对应的数据空间。</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isSupabaseConfigured && !currentUser) {
+    return (
+      <AuthScreen
+        mode={authMode}
+        form={authForm}
+        error={authError}
+        info={authInfo}
+        busy={authSubmitting}
+        onChange={updateAuthForm}
+        onSubmit={handleAuthSubmit}
+        onSwitchMode={toggleAuthMode}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-zinc-100 text-zinc-900">
       <div className="mx-auto max-w-7xl p-4 md:p-6">
@@ -3824,7 +4169,23 @@ export default function SemesterStudyHub() {
 
         {!isBootstrapping ? (
           <div className="mb-6">
-            <SectionCard title="页面导航" subtitle="这里保留所有页面入口，切换页面时会一直显示。">
+            <SectionCard
+              title="页面导航"
+              subtitle="这里保留所有页面入口，切换页面时会一直显示。"
+              right={
+                isSupabaseConfigured ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-full bg-zinc-100 px-3 py-2 text-xs font-medium text-zinc-600">当前账号：{currentUsername || "未命名用户"}</span>
+                    <MotionButton
+                      onClick={() => runWithStatusGuard(() => logoutUser())}
+                      className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                    >
+                      退出登录
+                    </MotionButton>
+                  </div>
+                ) : null
+              }
+            >
               <div className="flex flex-wrap items-center gap-3">
                 <NavTab active={page === "overview"} icon={<LayoutDashboard className="h-4 w-4" />} label="总览" onClick={() => navigateToPage("overview")} />
                 <NavTab active={page === "courses" || page === "courseDetail"} icon={<BookOpen className="h-4 w-4" />} label="本学期课程" onClick={() => navigateToPage("courses")} />
