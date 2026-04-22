@@ -519,12 +519,11 @@ function groupFiles(files = []) {
 
 function readLocalCoursesFromStorage(scope = "") {
   try {
-    const sources = [
-      localStorage.getItem(getScopedStorageKey(STORAGE_KEY, scope)),
-      ...LEGACY_KEYS.map((key) => localStorage.getItem(getScopedStorageKey(key, scope))),
-      ...(!scope ? [] : [localStorage.getItem(STORAGE_KEY), ...LEGACY_KEYS.map((key) => localStorage.getItem(key))]),
-    ].filter(Boolean);
-    const source = sources[0];
+    const sources = scope
+      ? [localStorage.getItem(getScopedStorageKey(STORAGE_KEY, scope)), ...LEGACY_KEYS.map((key) => localStorage.getItem(getScopedStorageKey(key, scope)))]
+      : [localStorage.getItem(STORAGE_KEY), ...LEGACY_KEYS.map((key) => localStorage.getItem(key))];
+    const availableSources = sources.filter(Boolean);
+    const source = availableSources[0];
     if (!source) return [];
     const parsed = JSON.parse(source);
     return Array.isArray(parsed) ? parsed.map(normalizeCourse).filter(Boolean) : [];
@@ -535,7 +534,7 @@ function readLocalCoursesFromStorage(scope = "") {
 
 function readLocalReviewsFromStorage(scope = "") {
   try {
-    const source = localStorage.getItem(getScopedStorageKey(REVIEW_STORAGE_KEY, scope)) || (!scope ? null : localStorage.getItem(REVIEW_STORAGE_KEY));
+    const source = scope ? localStorage.getItem(getScopedStorageKey(REVIEW_STORAGE_KEY, scope)) : localStorage.getItem(REVIEW_STORAGE_KEY);
     if (!source) return [];
     const parsed = JSON.parse(source);
     return Array.isArray(parsed) ? parsed.map(normalizeReviewItem).filter(Boolean) : [];
@@ -1503,6 +1502,7 @@ export default function SemesterStudyHub() {
   const [authError, setAuthError] = useState("");
   const [authInfo, setAuthInfo] = useState("");
   const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [selectedCourseId, setSelectedCourseId] = useState(null);
   const [selectedReviewId, setSelectedReviewId] = useState(null);
   const [query, setQuery] = useState("");
@@ -1558,6 +1558,7 @@ export default function SemesterStudyHub() {
   const fileDragDepthRef = useRef(0);
   const reviewFileInputRef = useRef(null);
   const reviewFileDragDepthRef = useRef(0);
+  const accountMenuRef = useRef(null);
   const bootstrapStartedRef = useRef("");
   const legacyFileMigrationStartedRef = useRef("");
   const didInitHistoryRef = useRef(false);
@@ -1746,7 +1747,7 @@ export default function SemesterStudyHub() {
 
       if (!isSupabaseConfigured || !supabase) {
         if (!cancelled) {
-          setCourses(localCourses.length ? localCourses : STARTER_COURSES.map((course) => makeCourse(course)));
+          setCourses(localCourses);
           setReviews(localReviews);
           setIsBootstrapping(false);
         }
@@ -1827,25 +1828,14 @@ export default function SemesterStudyHub() {
           return;
         }
 
-        const starterCourses = [];
-        for (const starter of STARTER_COURSES.map((course) => makeCourse(course))) {
-          starterCourses.push(
-            await withTimeout(
-              saveCourseToSupabase({ ...starter, id: undefined }),
-              8000,
-              "初始化云端课程超时"
-            )
-          );
-        }
-        localStorage.setItem(courseStorageKey, JSON.stringify(starterCourses));
+        localStorage.setItem(courseStorageKey, JSON.stringify([]));
         localStorage.setItem(reviewStorageKey, JSON.stringify([]));
-        setCourses(starterCourses);
+        setCourses([]);
         setReviews([]);
-        setToastMessage("已初始化云端课程数据。");
         setIsBootstrapping(false);
       } catch (error) {
         console.error("Failed to bootstrap Supabase data.", error);
-        setCourses(localCourses.length ? localCourses : STARTER_COURSES.map((course) => makeCourse(course)));
+        setCourses(localCourses);
         setReviews(localReviews);
         setToastMessage(`云端数据读取失败，已临时回退到本地数据。${error?.message ? `（${error.message}）` : ""}`);
         setIsBootstrapping(false);
@@ -1880,6 +1870,19 @@ export default function SemesterStudyHub() {
       setSelectedStatusHistoryWeekNumber(null);
     }
   }, [page, selectedCourseId, selectedReviewId]);
+
+  useEffect(() => {
+    if (!showAccountMenu) return undefined;
+
+    const handlePointerDown = (event) => {
+      if (accountMenuRef.current && !accountMenuRef.current.contains(event.target)) {
+        setShowAccountMenu(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [showAccountMenu]);
 
   useEffect(() => {
     setCollapsedCourseFileGroups({});
@@ -2730,6 +2733,7 @@ export default function SemesterStudyHub() {
     if (!supabase) return;
     try {
       await supabase.auth.signOut();
+      setShowAccountMenu(false);
       setCourses([]);
       setReviews([]);
       setPage("overview");
@@ -2742,6 +2746,14 @@ export default function SemesterStudyHub() {
       console.error("Failed to sign out.", error);
       window.alert("退出登录失败。");
     }
+  }
+
+  async function switchAccount() {
+    setAuthMode("login");
+    setAuthForm({ username: "", password: "", confirmPassword: "" });
+    setAuthError("");
+    setAuthInfo("");
+    await logoutUser();
   }
 
   function discardStatusChanges() {
@@ -4147,6 +4159,70 @@ export default function SemesterStudyHub() {
 
   return (
     <div className="min-h-screen bg-zinc-100 text-zinc-900">
+      {isSupabaseConfigured ? (
+        <div ref={accountMenuRef} className="fixed right-3 top-3 z-[70] sm:right-6 sm:top-6">
+          <MotionButton
+            onClick={() => setShowAccountMenu((prev) => !prev)}
+            className="flex items-center gap-2 rounded-full border border-zinc-200 bg-white/95 px-2.5 py-2 shadow-lg backdrop-blur hover:bg-white sm:gap-3 sm:px-3"
+          >
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-900 text-sm font-semibold text-white">
+              {(currentUsername || "U").slice(0, 1).toUpperCase()}
+            </div>
+            <div className="hidden min-w-0 text-left sm:block">
+              <div className="max-w-[150px] truncate text-sm font-semibold text-zinc-900">{currentUsername || "未命名用户"}</div>
+              <div className="text-xs text-zinc-500">个人账户</div>
+            </div>
+            <ChevronDown className={classNames("h-4 w-4 text-zinc-500 transition", showAccountMenu ? "rotate-180" : "")} />
+          </MotionButton>
+
+          <AnimatePresence>
+            {showAccountMenu ? (
+              <motion.div
+                initial={{ opacity: 0, y: -8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.16 }}
+                className="mt-3 w-[min(18rem,calc(100vw-1.5rem))] rounded-3xl border border-zinc-200 bg-white p-3.5 shadow-2xl sm:w-[280px] sm:p-4"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 text-base font-semibold text-white">
+                    {(currentUsername || "U").slice(0, 1).toUpperCase()}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-zinc-900">{currentUsername || "未命名用户"}</div>
+                    <div className="text-xs leading-5 text-zinc-500">当前登录账户</div>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm leading-6 text-zinc-600">
+                  退出当前账号后，会直接回到注册 / 登录页面。
+                </div>
+
+                <div className="mt-4 flex flex-col gap-2">
+                  <MotionButton
+                    onClick={() => runWithStatusGuard(() => switchAccount())}
+                    className="inline-flex items-center justify-center rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800"
+                  >
+                    切换账号
+                  </MotionButton>
+                  <MotionButton
+                    onClick={() => runWithStatusGuard(() => logoutUser())}
+                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                  >
+                    退出当前账号
+                  </MotionButton>
+                  <MotionButton
+                    onClick={() => setShowAccountMenu(false)}
+                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                  >
+                    关闭
+                  </MotionButton>
+                </div>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+        </div>
+      ) : null}
       <div className="mx-auto max-w-7xl p-4 md:p-6">
         {!isBootstrapping && page === "overview" ? (
           <div className="mb-6 rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm">
@@ -4167,23 +4243,7 @@ export default function SemesterStudyHub() {
 
         {!isBootstrapping ? (
           <div className="mb-6">
-            <SectionCard
-              title="页面导航"
-              subtitle="这里保留所有页面入口，切换页面时会一直显示。"
-              right={
-                isSupabaseConfigured ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded-full bg-zinc-100 px-3 py-2 text-xs font-medium text-zinc-600">当前账号：{currentUsername || "未命名用户"}</span>
-                    <MotionButton
-                      onClick={() => runWithStatusGuard(() => logoutUser())}
-                      className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-                    >
-                      退出登录
-                    </MotionButton>
-                  </div>
-                ) : null
-              }
-            >
+            <SectionCard title="页面导航" subtitle="这里保留所有页面入口，切换页面时会一直显示。">
               <div className="flex flex-wrap items-center gap-3">
                 <NavTab active={page === "overview"} icon={<LayoutDashboard className="h-4 w-4" />} label="总览" onClick={() => navigateToPage("overview")} />
                 <NavTab active={page === "courses" || page === "courseDetail"} icon={<BookOpen className="h-4 w-4" />} label="本学期课程" onClick={() => navigateToPage("courses")} />
