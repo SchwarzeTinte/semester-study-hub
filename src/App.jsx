@@ -31,6 +31,8 @@ const DB_NAME = "semester-study-hub-db";
 const STORE_NAME = "course-files";
 const AUTH_EMAIL_DOMAIN = "users.semester-study-hub.local";
 const USERNAME_REGEX = /^[a-z0-9](?:[a-z0-9_.-]{2,31})$/;
+const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || "";
+const TURNSTILE_SCRIPT_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
 const TERM_START = "2026-04-13";
 const TERM_END = "2026-07-17";
 const DAY_ORDER = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"];
@@ -79,6 +81,33 @@ function uid() {
 
 function classNames(...arr) {
   return arr.filter(Boolean).join(" ");
+}
+
+let turnstileScriptPromise = null;
+
+function loadTurnstileScript() {
+  if (typeof window === "undefined") return Promise.reject(new Error("Turnstile 只能在浏览器里使用。"));
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  if (turnstileScriptPromise) return turnstileScriptPromise;
+
+  turnstileScriptPromise = new Promise((resolve, reject) => {
+    const existingScript = document.querySelector(`script[src="${TURNSTILE_SCRIPT_SRC}"]`);
+    if (existingScript) {
+      existingScript.addEventListener("load", () => resolve(window.turnstile), { once: true });
+      existingScript.addEventListener("error", () => reject(new Error("Turnstile 脚本加载失败。")), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = TURNSTILE_SCRIPT_SRC;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve(window.turnstile);
+    script.onerror = () => reject(new Error("Turnstile 脚本加载失败。"));
+    document.head.appendChild(script);
+  });
+
+  return turnstileScriptPromise;
 }
 
 function normalizeUsernameInput(value = "") {
@@ -1388,7 +1417,80 @@ function StatusActionBar({ hasUnsavedStatusChanges, changedCount, onDiscard, onS
   );
 }
 
-function AuthScreen({ mode, form, error, info, busy, onChange, onSubmit, onSwitchMode }) {
+function TurnstileWidget({ siteKey, resetNonce, onTokenChange }) {
+  const containerRef = useRef(null);
+  const widgetIdRef = useRef(null);
+  const tokenChangeRef = useRef(onTokenChange);
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    tokenChangeRef.current = onTokenChange;
+  }, [onTokenChange]);
+
+  useEffect(() => {
+    if (!siteKey) {
+      tokenChangeRef.current("");
+      return undefined;
+    }
+
+    let active = true;
+
+    loadTurnstileScript()
+      .then((turnstile) => {
+        if (!active || !containerRef.current || !turnstile) return;
+        setLoadError("");
+        containerRef.current.innerHTML = "";
+        widgetIdRef.current = turnstile.render(containerRef.current, {
+          sitekey: siteKey,
+          theme: "light",
+          callback: (token) => tokenChangeRef.current(token || ""),
+          "expired-callback": () => tokenChangeRef.current(""),
+          "error-callback": () => tokenChangeRef.current(""),
+        });
+      })
+      .catch((error) => {
+        if (!active) return;
+        setLoadError(error?.message || "Turnstile 加载失败。");
+      });
+
+    return () => {
+      active = false;
+      tokenChangeRef.current("");
+      if (window.turnstile && widgetIdRef.current !== null) {
+        window.turnstile.remove(widgetIdRef.current);
+        widgetIdRef.current = null;
+      }
+      if (containerRef.current) {
+        containerRef.current.innerHTML = "";
+      }
+    };
+  }, [siteKey]);
+
+  useEffect(() => {
+    if (!siteKey) return;
+    tokenChangeRef.current("");
+    if (window.turnstile && widgetIdRef.current !== null) {
+      window.turnstile.reset(widgetIdRef.current);
+    }
+  }, [resetNonce, siteKey]);
+
+  if (!siteKey) {
+    return (
+      <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
+        还没有配置 `VITE_TURNSTILE_SITE_KEY`，目前无法启用 Turnstile 验证。
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div ref={containerRef} className="overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50 p-2" />
+      {loadError ? <div className="text-xs text-rose-600">{loadError}</div> : <div className="text-xs text-zinc-500">请先完成人机验证，再提交注册或登录。</div>}
+    </div>
+  );
+}
+
+function AuthScreen({ mode, form, error, info, busy, captchaResetNonce, onCaptchaChange, onChange, onSubmit, onSwitchMode }) {
   const isRegister = mode === "register";
 
   return (
@@ -1465,6 +1567,11 @@ function AuthScreen({ mode, form, error, info, busy, onChange, onSubmit, onSwitc
                 </label>
               ) : null}
 
+              <div className="space-y-2">
+                <div className="text-sm font-medium text-zinc-700">安全验证</div>
+                <TurnstileWidget siteKey={TURNSTILE_SITE_KEY} resetNonce={captchaResetNonce} onTokenChange={onCaptchaChange} />
+              </div>
+
               {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
               {info ? <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{info}</div> : null}
 
@@ -1502,6 +1609,8 @@ export default function SemesterStudyHub() {
   const [authError, setAuthError] = useState("");
   const [authInfo, setAuthInfo] = useState("");
   const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState("");
+  const [captchaResetNonce, setCaptchaResetNonce] = useState(0);
   const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [selectedCourseId, setSelectedCourseId] = useState(null);
   const [selectedReviewId, setSelectedReviewId] = useState(null);
@@ -2651,10 +2760,17 @@ export default function SemesterStudyHub() {
     if (authInfo) setAuthInfo("");
   }
 
+  function handleCaptchaChange(nextToken) {
+    setCaptchaToken(nextToken || "");
+    if (authError) setAuthError("");
+  }
+
   function toggleAuthMode() {
     setAuthMode((prev) => (prev === "login" ? "register" : "login"));
     setAuthError("");
     setAuthInfo("");
+    setCaptchaToken("");
+    setCaptchaResetNonce((prev) => prev + 1);
   }
 
   async function handleAuthSubmit(event) {
@@ -2681,6 +2797,10 @@ export default function SemesterStudyHub() {
       setAuthError("两次输入的密码不一致。");
       return;
     }
+    if (TURNSTILE_SITE_KEY && !captchaToken) {
+      setAuthError("请先完成人机验证。");
+      return;
+    }
 
     setAuthSubmitting(true);
     setAuthError("");
@@ -2694,6 +2814,7 @@ export default function SemesterStudyHub() {
           password,
           options: {
             data: { username },
+            captchaToken,
           },
         });
         if (error) throw error;
@@ -2709,6 +2830,9 @@ export default function SemesterStudyHub() {
         const { error } = await supabase.auth.signInWithPassword({
           email,
           password,
+          options: {
+            captchaToken,
+          },
         });
         if (error) throw error;
         setAuthForm({ username: "", password: "", confirmPassword: "" });
@@ -2726,6 +2850,8 @@ export default function SemesterStudyHub() {
       }
     } finally {
       setAuthSubmitting(false);
+      setCaptchaToken("");
+      setCaptchaResetNonce((prev) => prev + 1);
     }
   }
 
@@ -2742,6 +2868,8 @@ export default function SemesterStudyHub() {
       setStatusDrafts({});
       setReviewStatusDrafts({});
       setToastMessage("");
+      setCaptchaToken("");
+      setCaptchaResetNonce((prev) => prev + 1);
     } catch (error) {
       console.error("Failed to sign out.", error);
       window.alert("退出登录失败。");
@@ -2753,6 +2881,8 @@ export default function SemesterStudyHub() {
     setAuthForm({ username: "", password: "", confirmPassword: "" });
     setAuthError("");
     setAuthInfo("");
+    setCaptchaToken("");
+    setCaptchaResetNonce((prev) => prev + 1);
     await logoutUser();
   }
 
@@ -4150,6 +4280,8 @@ export default function SemesterStudyHub() {
         error={authError}
         info={authInfo}
         busy={authSubmitting}
+        captchaResetNonce={captchaResetNonce}
+        onCaptchaChange={handleCaptchaChange}
         onChange={updateAuthForm}
         onSubmit={handleAuthSubmit}
         onSwitchMode={toggleAuthMode}
