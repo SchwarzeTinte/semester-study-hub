@@ -29,8 +29,9 @@ const REVIEW_STORAGE_KEY = "semester-review-hub-v1";
 const LEGACY_KEYS = ["semester-study-hub-v2", "semester-study-hub-v1"];
 const DB_NAME = "semester-study-hub-db";
 const STORE_NAME = "course-files";
-const AUTH_EMAIL_DOMAIN = "users.semester-study-hub.local";
+const LEGACY_AUTH_EMAIL_DOMAIN = "users.semester-study-hub.local";
 const USERNAME_REGEX = /^[a-z0-9](?:[a-z0-9_.-]{2,31})$/;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || "";
 const TURNSTILE_SCRIPT_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
 const TERM_START = "2026-04-13";
@@ -114,12 +115,16 @@ function normalizeUsernameInput(value = "") {
   return value.trim().toLowerCase();
 }
 
-function usernameToAuthEmail(username = "") {
-  return `${normalizeUsernameInput(username)}@${AUTH_EMAIL_DOMAIN}`;
+function normalizeAuthEmail(value = "") {
+  return value.trim().toLowerCase();
 }
 
 function authEmailToUsername(email = "") {
   return email.split("@")[0] || "";
+}
+
+function isLegacyAuthEmail(email = "") {
+  return normalizeAuthEmail(email).endsWith(`@${LEGACY_AUTH_EMAIL_DOMAIN}`);
 }
 
 function getScopedStorageKey(baseKey, scope = "") {
@@ -1490,8 +1495,38 @@ function TurnstileWidget({ siteKey, resetNonce, onTokenChange }) {
   );
 }
 
-function AuthScreen({ mode, form, error, info, busy, captchaResetNonce, onCaptchaChange, onChange, onSubmit, onSwitchMode }) {
+function AuthScreen({
+  mode,
+  form,
+  error,
+  info,
+  busy,
+  captchaResetNonce,
+  onCaptchaChange,
+  onChange,
+  onSubmit,
+  onOpenLogin,
+  onOpenRegister,
+  onOpenForgot,
+  recoveryEmail,
+}) {
   const isRegister = mode === "register";
+  const isForgot = mode === "forgot";
+  const isReset = mode === "reset";
+  const showEmailField = isRegister || isForgot || mode === "login";
+  const showUsernameField = isRegister;
+  const showPasswordField = !isForgot;
+  const showConfirmPasswordField = isRegister || isReset;
+  const requiresCaptcha = !isReset;
+  const title = isRegister ? "注册账号" : isForgot ? "找回密码" : isReset ? "设置新密码" : "登录账号";
+  const description = isRegister
+    ? "使用邮箱注册后，账户会拥有独立的数据空间，也能通过邮箱重置密码。"
+    : isForgot
+      ? "输入注册邮箱，我们会发送一封密码重置邮件给你。"
+      : isReset
+        ? "你已经通过邮件验证，请输入一个新的密码。"
+        : "输入注册邮箱和密码，进入你自己的课程数据。";
+  const submitLabel = busy ? "提交中..." : isRegister ? "注册并进入" : isForgot ? "发送重置邮件" : isReset ? "更新密码" : "登录";
 
   return (
     <div className="min-h-screen bg-zinc-100 px-4 py-10 text-zinc-900">
@@ -1509,7 +1544,7 @@ function AuthScreen({ mode, form, error, info, busy, captchaResetNonce, onCaptch
             <div className="mt-8 grid gap-3 sm:grid-cols-3">
               <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
                 <div className="text-sm font-semibold text-zinc-900">账号登录</div>
-                <div className="mt-2 text-sm leading-6 text-zinc-500">使用账户名和密码进入自己的学习空间。</div>
+                <div className="mt-2 text-sm leading-6 text-zinc-500">使用邮箱和密码登录，用户名只作为展示昵称。</div>
               </div>
               <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4">
                 <div className="text-sm font-semibold text-zinc-900">数据隔离</div>
@@ -1524,36 +1559,62 @@ function AuthScreen({ mode, form, error, info, busy, captchaResetNonce, onCaptch
 
           <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm">
             <div className="mb-6">
-              <h2 className="text-2xl font-semibold text-zinc-950">{isRegister ? "注册账号" : "登录账号"}</h2>
-              <p className="mt-2 text-sm leading-6 text-zinc-500">{isRegister ? "创建新用户后，就会自动拥有独立的数据空间。" : "输入账户名和密码，进入你自己的课程数据。"}</p>
+              <h2 className="text-2xl font-semibold text-zinc-950">{title}</h2>
+              <p className="mt-2 text-sm leading-6 text-zinc-500">{description}</p>
             </div>
 
             <form className="space-y-4" onSubmit={onSubmit}>
-              <label className="block">
-                <div className="mb-2 text-sm font-medium text-zinc-700">账户名</div>
-                <input
-                  value={form.username}
-                  onChange={(event) => onChange("username", event.target.value)}
-                  placeholder="例如：alice_01"
-                  autoComplete="username"
-                  className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
-                />
-                <div className="mt-2 text-xs text-zinc-500">支持小写字母、数字、下划线、点和连字符，长度 3-32 位。</div>
-              </label>
+              {showUsernameField ? (
+                <label className="block">
+                  <div className="mb-2 text-sm font-medium text-zinc-700">用户名</div>
+                  <input
+                    value={form.username}
+                    onChange={(event) => onChange("username", event.target.value)}
+                    placeholder="例如：alice_01"
+                    autoComplete="username"
+                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                  />
+                  <div className="mt-2 text-xs text-zinc-500">这是公开显示的昵称，支持小写字母、数字、下划线、点和连字符，长度 3-32 位。</div>
+                </label>
+              ) : null}
 
-              <label className="block">
-                <div className="mb-2 text-sm font-medium text-zinc-700">密码</div>
-                <input
-                  type="password"
-                  value={form.password}
-                  onChange={(event) => onChange("password", event.target.value)}
-                  placeholder="至少 6 位"
-                  autoComplete={isRegister ? "new-password" : "current-password"}
-                  className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
-                />
-              </label>
+              {showEmailField ? (
+                <label className="block">
+                  <div className="mb-2 text-sm font-medium text-zinc-700">邮箱</div>
+                  <input
+                    type="email"
+                    value={form.email}
+                    onChange={(event) => onChange("email", event.target.value)}
+                    placeholder="name@example.com"
+                    autoComplete="email"
+                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                  />
+                  {isForgot ? <div className="mt-2 text-xs text-zinc-500">系统会把密码重置邮件发送到这个邮箱。</div> : null}
+                </label>
+              ) : null}
 
-              {isRegister ? (
+              {showPasswordField ? (
+                <label className="block">
+                  <div className="mb-2 text-sm font-medium text-zinc-700">{isReset ? "新密码" : "密码"}</div>
+                  <input
+                    type="password"
+                    value={form.password}
+                    onChange={(event) => onChange("password", event.target.value)}
+                    placeholder="至少 6 位"
+                    autoComplete={isRegister || isReset ? "new-password" : "current-password"}
+                    className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                  />
+                  {mode === "login" ? (
+                    <div className="mt-2 flex justify-end">
+                      <button type="button" onClick={onOpenForgot} className="text-xs font-medium text-zinc-500 transition hover:text-zinc-900">
+                        忘记密码？
+                      </button>
+                    </div>
+                  ) : null}
+                </label>
+              ) : null}
+
+              {showConfirmPasswordField ? (
                 <label className="block">
                   <div className="mb-2 text-sm font-medium text-zinc-700">确认密码</div>
                   <input
@@ -1567,10 +1628,18 @@ function AuthScreen({ mode, form, error, info, busy, captchaResetNonce, onCaptch
                 </label>
               ) : null}
 
-              <div className="space-y-2">
-                <div className="text-sm font-medium text-zinc-700">安全验证</div>
-                <TurnstileWidget siteKey={TURNSTILE_SITE_KEY} resetNonce={captchaResetNonce} onTokenChange={onCaptchaChange} />
-              </div>
+              {isReset && recoveryEmail ? (
+                <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+                  当前恢复邮箱：{recoveryEmail}
+                </div>
+              ) : null}
+
+              {requiresCaptcha ? (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium text-zinc-700">安全验证</div>
+                  <TurnstileWidget siteKey={TURNSTILE_SITE_KEY} resetNonce={captchaResetNonce} onTokenChange={onCaptchaChange} />
+                </div>
+              ) : null}
 
               {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
               {info ? <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{info}</div> : null}
@@ -1581,15 +1650,35 @@ function AuthScreen({ mode, form, error, info, busy, captchaResetNonce, onCaptch
                   disabled={busy}
                   className="inline-flex flex-1 items-center justify-center rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
                 >
-                  {busy ? "提交中..." : isRegister ? "注册并进入" : "登录"}
+                  {submitLabel}
                 </MotionButton>
-                <MotionButton
-                  type="button"
-                  onClick={onSwitchMode}
-                  className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-                >
-                  {isRegister ? "去登录" : "去注册"}
-                </MotionButton>
+                {isRegister ? (
+                  <MotionButton
+                    type="button"
+                    onClick={onOpenLogin}
+                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                  >
+                    去登录
+                  </MotionButton>
+                ) : null}
+                {mode === "login" ? (
+                  <MotionButton
+                    type="button"
+                    onClick={onOpenRegister}
+                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                  >
+                    去注册
+                  </MotionButton>
+                ) : null}
+                {isForgot || isReset ? (
+                  <MotionButton
+                    type="button"
+                    onClick={onOpenLogin}
+                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                  >
+                    返回登录
+                  </MotionButton>
+                ) : null}
               </div>
             </form>
           </div>
@@ -1599,19 +1688,176 @@ function AuthScreen({ mode, form, error, info, busy, captchaResetNonce, onCaptch
   );
 }
 
+function ChangePasswordModal({ open, form, error, info, busy, onChange, onClose, onSubmit }) {
+  if (!open) return null;
+
+  return (
+    <AnimatePresence>
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[90] flex items-center justify-center bg-zinc-950/35 px-4">
+        <motion.div
+          initial={{ opacity: 0, y: 12, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 12, scale: 0.98 }}
+          transition={{ duration: 0.18 }}
+          className="w-full max-w-md rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-2xl"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-xl font-semibold text-zinc-950">修改密码</h3>
+              <p className="mt-2 text-sm leading-6 text-zinc-500">输入一个新的密码，保存后当前账号会继续保持登录。</p>
+            </div>
+            <button type="button" onClick={onClose} className="rounded-full p-2 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <form className="mt-6 space-y-4" onSubmit={onSubmit}>
+            <label className="block">
+              <div className="mb-2 text-sm font-medium text-zinc-700">新密码</div>
+              <input
+                type="password"
+                value={form.password}
+                onChange={(event) => onChange("password", event.target.value)}
+                placeholder="至少 6 位"
+                autoComplete="new-password"
+                className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+              />
+            </label>
+
+            <label className="block">
+              <div className="mb-2 text-sm font-medium text-zinc-700">确认新密码</div>
+              <input
+                type="password"
+                value={form.confirmPassword}
+                onChange={(event) => onChange("confirmPassword", event.target.value)}
+                placeholder="再次输入新密码"
+                autoComplete="new-password"
+                className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+              />
+            </label>
+
+            {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
+            {info ? <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{info}</div> : null}
+
+            <div className="flex flex-col gap-3 pt-2 sm:flex-row">
+              <MotionButton
+                type="submit"
+                disabled={busy}
+                className="inline-flex flex-1 items-center justify-center rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+              >
+                {busy ? "保存中..." : "保存新密码"}
+              </MotionButton>
+              <MotionButton
+                type="button"
+                onClick={onClose}
+                className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+              >
+                取消
+              </MotionButton>
+            </div>
+          </form>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
+
+function ChangeEmailModal({ open, currentEmail, isLegacyEmail, form, error, info, busy, onChange, onClose, onSubmit }) {
+  if (!open) return null;
+
+  return (
+    <AnimatePresence>
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[90] flex items-center justify-center bg-zinc-950/35 px-4">
+        <motion.div
+          initial={{ opacity: 0, y: 12, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 12, scale: 0.98 }}
+          transition={{ duration: 0.18 }}
+          className="w-full max-w-md rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-2xl"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-xl font-semibold text-zinc-950">修改绑定邮箱</h3>
+              <p className="mt-2 text-sm leading-6 text-zinc-500">绑定真实邮箱后，用户才能使用标准的忘记密码邮件找回流程。</p>
+            </div>
+            <button type="button" onClick={onClose} className="rounded-full p-2 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <form className="mt-6 space-y-4" onSubmit={onSubmit}>
+            <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+              当前邮箱：{currentEmail || "未绑定"}
+            </div>
+
+            {isLegacyEmail ? (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
+                当前账号仍然是旧版内部邮箱。要顺利迁移到真实邮箱，Supabase 里的 `Secure email change` 最好先临时关闭，否则系统可能还会要求旧邮箱确认。
+              </div>
+            ) : null}
+
+            <label className="block">
+              <div className="mb-2 text-sm font-medium text-zinc-700">新邮箱</div>
+              <input
+                type="email"
+                value={form.email}
+                onChange={(event) => onChange("email", event.target.value)}
+                placeholder="name@example.com"
+                autoComplete="email"
+                className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+              />
+              <div className="mt-2 text-xs text-zinc-500">提交后，Supabase 会向新邮箱发送确认邮件。</div>
+            </label>
+
+            {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
+            {info ? <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{info}</div> : null}
+
+            <div className="flex flex-col gap-3 pt-2 sm:flex-row">
+              <MotionButton
+                type="submit"
+                disabled={busy}
+                className="inline-flex flex-1 items-center justify-center rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+              >
+                {busy ? "提交中..." : "发送邮箱变更确认"}
+              </MotionButton>
+              <MotionButton
+                type="button"
+                onClick={onClose}
+                className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+              >
+                取消
+              </MotionButton>
+            </div>
+          </form>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
+
 export default function SemesterStudyHub() {
   const [courses, setCourses] = useState([]);
   const [reviews, setReviews] = useState([]);
   const [session, setSession] = useState(null);
   const [authResolved, setAuthResolved] = useState(!isSupabaseConfigured);
   const [authMode, setAuthMode] = useState("login");
-  const [authForm, setAuthForm] = useState({ username: "", password: "", confirmPassword: "" });
+  const [authForm, setAuthForm] = useState({ username: "", email: "", password: "", confirmPassword: "" });
   const [authError, setAuthError] = useState("");
   const [authInfo, setAuthInfo] = useState("");
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [captchaToken, setCaptchaToken] = useState("");
   const [captchaResetNonce, setCaptchaResetNonce] = useState(0);
   const [showAccountMenu, setShowAccountMenu] = useState(false);
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
+  const [showChangeEmailModal, setShowChangeEmailModal] = useState(false);
+  const [changePasswordForm, setChangePasswordForm] = useState({ password: "", confirmPassword: "" });
+  const [changePasswordError, setChangePasswordError] = useState("");
+  const [changePasswordInfo, setChangePasswordInfo] = useState("");
+  const [changePasswordSubmitting, setChangePasswordSubmitting] = useState(false);
+  const [changeEmailForm, setChangeEmailForm] = useState({ email: "" });
+  const [changeEmailError, setChangeEmailError] = useState("");
+  const [changeEmailInfo, setChangeEmailInfo] = useState("");
+  const [changeEmailSubmitting, setChangeEmailSubmitting] = useState(false);
   const [selectedCourseId, setSelectedCourseId] = useState(null);
   const [selectedReviewId, setSelectedReviewId] = useState(null);
   const [query, setQuery] = useState("");
@@ -1675,6 +1921,8 @@ export default function SemesterStudyHub() {
   const currentUser = session?.user || null;
   const currentUserId = currentUser?.id || "";
   const currentUsername = currentUser?.user_metadata?.username || authEmailToUsername(currentUser?.email || "");
+  const currentUserEmail = currentUser?.email || "";
+  const currentUserHasLegacyEmail = isLegacyAuthEmail(currentUserEmail);
   const storageScope = isSupabaseConfigured ? currentUserId : "";
   const courseStorageKey = useMemo(() => getScopedStorageKey(STORAGE_KEY, storageScope), [storageScope]);
   const reviewStorageKey = useMemo(() => getScopedStorageKey(REVIEW_STORAGE_KEY, storageScope), [storageScope]);
@@ -1706,7 +1954,15 @@ export default function SemesterStudyHub() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setAuthMode("reset");
+        setAuthError("");
+        setAuthInfo("请设置一个新的密码。");
+      }
+      if (event === "SIGNED_OUT") {
+        setAuthMode("login");
+      }
       setSession(nextSession || null);
       setAuthResolved(true);
     });
@@ -1715,6 +1971,16 @@ export default function SemesterStudyHub() {
       active = false;
       subscription.unsubscribe();
     };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const authUrlState = `${window.location.hash || ""}${window.location.search || ""}`;
+    if (/type=recovery/i.test(authUrlState)) {
+      setAuthMode("reset");
+      setAuthError("");
+      setAuthInfo("请设置一个新的密码。");
+    }
   }, []);
 
   useEffect(() => {
@@ -2760,17 +3026,153 @@ export default function SemesterStudyHub() {
     if (authInfo) setAuthInfo("");
   }
 
+  function resetCaptchaChallenge() {
+    setCaptchaToken("");
+    setCaptchaResetNonce((prev) => prev + 1);
+  }
+
   function handleCaptchaChange(nextToken) {
     setCaptchaToken(nextToken || "");
     if (authError) setAuthError("");
   }
 
-  function toggleAuthMode() {
-    setAuthMode((prev) => (prev === "login" ? "register" : "login"));
+  function resetAuthState(nextMode = "login") {
+    setAuthMode(nextMode);
     setAuthError("");
     setAuthInfo("");
-    setCaptchaToken("");
-    setCaptchaResetNonce((prev) => prev + 1);
+    setAuthForm({ username: "", email: "", password: "", confirmPassword: "" });
+    resetCaptchaChallenge();
+  }
+
+  function openLoginMode() {
+    resetAuthState("login");
+  }
+
+  function openRegisterMode() {
+    resetAuthState("register");
+  }
+
+  function openForgotPasswordMode() {
+    setAuthMode("forgot");
+    setAuthError("");
+    setAuthInfo("");
+    setAuthForm((prev) => ({ ...prev, password: "", confirmPassword: "" }));
+    resetCaptchaChallenge();
+  }
+
+  function updateChangePasswordForm(field, value) {
+    setChangePasswordForm((prev) => ({ ...prev, [field]: value }));
+    if (changePasswordError) setChangePasswordError("");
+    if (changePasswordInfo) setChangePasswordInfo("");
+  }
+
+  function closeChangePasswordModal() {
+    setShowChangePasswordModal(false);
+    setChangePasswordForm({ password: "", confirmPassword: "" });
+    setChangePasswordError("");
+    setChangePasswordInfo("");
+  }
+
+  function updateChangeEmailForm(field, value) {
+    setChangeEmailForm((prev) => ({ ...prev, [field]: value }));
+    if (changeEmailError) setChangeEmailError("");
+    if (changeEmailInfo) setChangeEmailInfo("");
+  }
+
+  function closeChangeEmailModal() {
+    setShowChangeEmailModal(false);
+    setChangeEmailForm({ email: "" });
+    setChangeEmailError("");
+    setChangeEmailInfo("");
+  }
+
+  function openChangeEmailModal() {
+    setShowAccountMenu(false);
+    setChangeEmailForm({ email: "" });
+    setChangeEmailError("");
+    setChangeEmailInfo("");
+    setShowChangeEmailModal(true);
+  }
+
+  function openChangePasswordModal() {
+    setShowAccountMenu(false);
+    setChangePasswordForm({ password: "", confirmPassword: "" });
+    setChangePasswordError("");
+    setChangePasswordInfo("");
+    setShowChangePasswordModal(true);
+  }
+
+  async function handleChangeEmailSubmit(event) {
+    event.preventDefault();
+    if (!supabase) return;
+
+    const nextEmail = normalizeAuthEmail(changeEmailForm.email);
+    if (!EMAIL_REGEX.test(nextEmail)) {
+      setChangeEmailError("请输入有效的邮箱地址。");
+      return;
+    }
+    if (nextEmail === normalizeAuthEmail(currentUserEmail)) {
+      setChangeEmailError("新邮箱不能和当前邮箱相同。");
+      return;
+    }
+
+    setChangeEmailSubmitting(true);
+    setChangeEmailError("");
+    setChangeEmailInfo("");
+
+    try {
+      const { error } = await supabase.auth.updateUser({ email: nextEmail });
+      if (error) throw error;
+      setChangeEmailInfo("验证邮件已发送，请去新邮箱完成确认。");
+      setToastMessage("邮箱变更确认邮件已发送。");
+    } catch (error) {
+      const message = error?.message || "";
+      if (/already registered/i.test(message)) {
+        setChangeEmailError("这个邮箱已经被其他账号使用了。");
+      } else if (/unable to validate email address/i.test(message)) {
+        setChangeEmailError("这个邮箱地址无效，请检查后重试。");
+      } else {
+        setChangeEmailError(message || "修改邮箱失败，请稍后再试。");
+      }
+    } finally {
+      setChangeEmailSubmitting(false);
+    }
+  }
+
+  async function handleChangePasswordSubmit(event) {
+    event.preventDefault();
+    if (!supabase) return;
+
+    const nextPassword = changePasswordForm.password;
+    if (nextPassword.length < 6) {
+      setChangePasswordError("密码至少需要 6 位。");
+      return;
+    }
+    if (nextPassword !== changePasswordForm.confirmPassword) {
+      setChangePasswordError("两次输入的密码不一致。");
+      return;
+    }
+
+    setChangePasswordSubmitting(true);
+    setChangePasswordError("");
+    setChangePasswordInfo("");
+
+    try {
+      const { error } = await supabase.auth.updateUser({ password: nextPassword });
+      if (error) throw error;
+      setChangePasswordInfo("密码已更新。");
+      setToastMessage("密码已更新。");
+      window.setTimeout(() => closeChangePasswordModal(), 400);
+    } catch (error) {
+      const message = error?.message || "";
+      if (/same password/i.test(message)) {
+        setChangePasswordError("新密码不能和旧密码相同。");
+      } else {
+        setChangePasswordError(message || "修改密码失败，请稍后再试。");
+      }
+    } finally {
+      setChangePasswordSubmitting(false);
+    }
   }
 
   async function handleAuthSubmit(event) {
@@ -2781,23 +3183,30 @@ export default function SemesterStudyHub() {
     }
 
     const username = normalizeUsernameInput(authForm.username);
+    const email = normalizeAuthEmail(authForm.email);
     const password = authForm.password;
     const confirmPassword = authForm.confirmPassword;
     const isRegister = authMode === "register";
+    const isForgot = authMode === "forgot";
+    const isReset = authMode === "reset";
 
-    if (!USERNAME_REGEX.test(username)) {
+    if (isRegister && !USERNAME_REGEX.test(username)) {
       setAuthError("账户名格式不正确，请使用 3-32 位小写字母、数字、下划线、点或连字符。");
       return;
     }
-    if (password.length < 6) {
+    if ((isRegister || authMode === "login" || isForgot) && !EMAIL_REGEX.test(email)) {
+      setAuthError("请输入有效的邮箱地址。");
+      return;
+    }
+    if (!isForgot && password.length < 6) {
       setAuthError("密码至少需要 6 位。");
       return;
     }
-    if (isRegister && password !== confirmPassword) {
+    if ((isRegister || isReset) && password !== confirmPassword) {
       setAuthError("两次输入的密码不一致。");
       return;
     }
-    if (TURNSTILE_SITE_KEY && !captchaToken) {
+    if (!isReset && TURNSTILE_SITE_KEY && !captchaToken) {
       setAuthError("请先完成人机验证。");
       return;
     }
@@ -2807,7 +3216,6 @@ export default function SemesterStudyHub() {
     setAuthInfo("");
 
     try {
-      const email = usernameToAuthEmail(username);
       if (isRegister) {
         const { data, error } = await supabase.auth.signUp({
           email,
@@ -2819,13 +3227,30 @@ export default function SemesterStudyHub() {
         });
         if (error) throw error;
 
-        setAuthForm({ username: "", password: "", confirmPassword: "" });
+        setAuthForm({ username: "", email: "", password: "", confirmPassword: "" });
         if (data?.session) {
           setAuthInfo("注册成功，已自动登录。");
         } else {
           setAuthMode("login");
-          setAuthInfo("注册成功。若后续无法登录，请在 Supabase Auth 设置里关闭邮件确认，因为这里使用的是账户名映射登录。");
+          setAuthInfo("注册成功，请先去邮箱确认账号，然后再登录。");
         }
+      } else if (isForgot) {
+        const redirectTo = typeof window !== "undefined" ? window.location.origin : undefined;
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo,
+          captchaToken,
+        });
+        if (error) throw error;
+        setAuthMode("login");
+        setAuthForm({ username: "", email: "", password: "", confirmPassword: "" });
+        setAuthInfo("重置邮件已发送，请去邮箱打开链接后设置新密码。");
+      } else if (isReset) {
+        const { error } = await supabase.auth.updateUser({ password });
+        if (error) throw error;
+        setAuthMode("login");
+        setAuthForm({ username: "", email: "", password: "", confirmPassword: "" });
+        setAuthInfo("");
+        setToastMessage("密码已更新。");
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email,
@@ -2835,23 +3260,26 @@ export default function SemesterStudyHub() {
           },
         });
         if (error) throw error;
-        setAuthForm({ username: "", password: "", confirmPassword: "" });
+        setAuthForm({ username: "", email: "", password: "", confirmPassword: "" });
       }
     } catch (error) {
       const message = error?.message || "";
       if (/invalid login credentials/i.test(message)) {
-        setAuthError("账户名或密码不正确。");
+        setAuthError("邮箱或密码不正确。");
+      } else if (/email not confirmed/i.test(message)) {
+        setAuthError("这个邮箱还没有完成验证，请先去邮箱点击确认链接。");
       } else if (/user already registered/i.test(message) || /already been registered/i.test(message)) {
-        setAuthError("这个账户名已经被注册了。");
+        setAuthError("这个邮箱已经被注册了。");
       } else if (/password/i.test(message) && /6/i.test(message)) {
         setAuthError("密码至少需要 6 位。");
+      } else if (/unable to validate email address/i.test(message)) {
+        setAuthError("这个邮箱地址无效，请检查后重试。");
       } else {
         setAuthError(message || "认证失败，请稍后再试。");
       }
     } finally {
       setAuthSubmitting(false);
-      setCaptchaToken("");
-      setCaptchaResetNonce((prev) => prev + 1);
+      if (!isReset) resetCaptchaChallenge();
     }
   }
 
@@ -2868,8 +3296,15 @@ export default function SemesterStudyHub() {
       setStatusDrafts({});
       setReviewStatusDrafts({});
       setToastMessage("");
-      setCaptchaToken("");
-      setCaptchaResetNonce((prev) => prev + 1);
+      resetCaptchaChallenge();
+      setShowChangePasswordModal(false);
+      setChangePasswordForm({ password: "", confirmPassword: "" });
+      setChangePasswordError("");
+      setChangePasswordInfo("");
+      setShowChangeEmailModal(false);
+      setChangeEmailForm({ email: "" });
+      setChangeEmailError("");
+      setChangeEmailInfo("");
     } catch (error) {
       console.error("Failed to sign out.", error);
       window.alert("退出登录失败。");
@@ -2877,12 +3312,11 @@ export default function SemesterStudyHub() {
   }
 
   async function switchAccount() {
-    setAuthMode("login");
-    setAuthForm({ username: "", password: "", confirmPassword: "" });
+    setAuthForm({ username: "", email: "", password: "", confirmPassword: "" });
     setAuthError("");
     setAuthInfo("");
-    setCaptchaToken("");
-    setCaptchaResetNonce((prev) => prev + 1);
+    setAuthMode("login");
+    resetCaptchaChallenge();
     await logoutUser();
   }
 
@@ -4272,7 +4706,7 @@ export default function SemesterStudyHub() {
     );
   }
 
-  if (isSupabaseConfigured && !currentUser) {
+  if (isSupabaseConfigured && (authMode === "reset" || !currentUser)) {
     return (
       <AuthScreen
         mode={authMode}
@@ -4284,7 +4718,10 @@ export default function SemesterStudyHub() {
         onCaptchaChange={handleCaptchaChange}
         onChange={updateAuthForm}
         onSubmit={handleAuthSubmit}
-        onSwitchMode={toggleAuthMode}
+        onOpenLogin={openLoginMode}
+        onOpenRegister={openRegisterMode}
+        onOpenForgot={openForgotPasswordMode}
+        recoveryEmail={currentUserEmail || normalizeAuthEmail(authForm.email)}
       />
     );
   }
@@ -4302,7 +4739,7 @@ export default function SemesterStudyHub() {
             </div>
             <div className="hidden min-w-0 text-left sm:block">
               <div className="max-w-[150px] truncate text-sm font-semibold text-zinc-900">{currentUsername || "未命名用户"}</div>
-              <div className="text-xs text-zinc-500">个人账户</div>
+              <div className="max-w-[150px] truncate text-xs text-zinc-500">{currentUserEmail || "个人账户"}</div>
             </div>
             <ChevronDown className={classNames("h-4 w-4 text-zinc-500 transition", showAccountMenu ? "rotate-180" : "")} />
           </MotionButton>
@@ -4322,15 +4759,32 @@ export default function SemesterStudyHub() {
                   </div>
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold text-zinc-900">{currentUsername || "未命名用户"}</div>
-                    <div className="text-xs leading-5 text-zinc-500">当前登录账户</div>
+                    <div className="truncate text-xs leading-5 text-zinc-500">{currentUserEmail || "当前登录账户"}</div>
                   </div>
                 </div>
 
                 <div className="mt-4 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm leading-6 text-zinc-600">
                   退出当前账号后，会直接回到注册 / 登录页面。
                 </div>
+                {currentUserHasLegacyEmail ? (
+                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
+                    当前账号还是旧版内部邮箱。建议尽快改绑真实邮箱，之后忘记密码才能通过邮件找回。
+                  </div>
+                ) : null}
 
                 <div className="mt-4 flex flex-col gap-2">
+                  <MotionButton
+                    onClick={openChangeEmailModal}
+                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                  >
+                    修改绑定邮箱
+                  </MotionButton>
+                  <MotionButton
+                    onClick={openChangePasswordModal}
+                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                  >
+                    修改密码
+                  </MotionButton>
                   <MotionButton
                     onClick={() => runWithStatusGuard(() => switchAccount())}
                     className="inline-flex items-center justify-center rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800"
@@ -4355,6 +4809,28 @@ export default function SemesterStudyHub() {
           </AnimatePresence>
         </div>
       ) : null}
+      <ChangePasswordModal
+        open={showChangePasswordModal}
+        form={changePasswordForm}
+        error={changePasswordError}
+        info={changePasswordInfo}
+        busy={changePasswordSubmitting}
+        onChange={updateChangePasswordForm}
+        onClose={closeChangePasswordModal}
+        onSubmit={handleChangePasswordSubmit}
+      />
+      <ChangeEmailModal
+        open={showChangeEmailModal}
+        currentEmail={currentUserEmail}
+        isLegacyEmail={currentUserHasLegacyEmail}
+        form={changeEmailForm}
+        error={changeEmailError}
+        info={changeEmailInfo}
+        busy={changeEmailSubmitting}
+        onChange={updateChangeEmailForm}
+        onClose={closeChangeEmailModal}
+        onSubmit={handleChangeEmailSubmit}
+      />
       <div className="mx-auto max-w-7xl p-4 md:p-6">
         {!isBootstrapping && page === "overview" ? (
           <div className="mb-6 rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm">
