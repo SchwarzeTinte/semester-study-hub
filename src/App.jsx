@@ -13,16 +13,27 @@ import {
   FileText,
   FolderOpen,
   GraduationCap,
+  ImagePlus,
+  Info,
   LayoutDashboard,
+  LogOut,
+  Mail,
+  Moon,
+  Palette,
   Pencil,
   Plus,
   RotateCcw,
   Search,
+  Settings2,
+  Shield,
+  Sun,
   Trash2,
   Upload,
+  User,
   X,
 } from "lucide-react";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
+import "./App.css";
 
 const STORAGE_KEY = "semester-study-hub-v3";
 const REVIEW_STORAGE_KEY = "semester-review-hub-v1";
@@ -34,6 +45,8 @@ const USERNAME_REGEX = /^[a-z0-9](?:[a-z0-9_.-]{2,31})$/;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || "";
 const TURNSTILE_SCRIPT_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+const THEME_STORAGE_KEY = "semester-ui-theme-v1";
+const SUPPORT_EMAIL = "lalashuai39@gmail.com";
 const TERM_START = "2026-04-13";
 const TERM_END = "2026-07-17";
 const DAY_ORDER = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"];
@@ -125,6 +138,15 @@ function authEmailToUsername(email = "") {
 
 function isLegacyAuthEmail(email = "") {
   return normalizeAuthEmail(email).endsWith(`@${LEGACY_AUTH_EMAIL_DOMAIN}`);
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(new Error("头像读取失败，请换一张图片再试。"));
+    reader.readAsDataURL(file);
+  });
 }
 
 function getScopedStorageKey(baseKey, scope = "") {
@@ -1422,7 +1444,19 @@ function StatusActionBar({ hasUnsavedStatusChanges, changedCount, onDiscard, onS
   );
 }
 
-function TurnstileWidget({ siteKey, resetNonce, onTokenChange }) {
+function AccountAvatar({ src, label, className = "", textClassName = "" }) {
+  if (src) {
+    return <img src={src} alt={`${label || "用户"}头像`} className={classNames("rounded-full object-cover", className)} />;
+  }
+
+  return (
+    <div className={classNames("flex items-center justify-center rounded-full bg-zinc-900 font-semibold text-white", className, textClassName)}>
+      {(label || "U").slice(0, 1).toUpperCase()}
+    </div>
+  );
+}
+
+function TurnstileWidget({ siteKey, resetNonce, onTokenChange, themeMode = "light" }) {
   const containerRef = useRef(null);
   const widgetIdRef = useRef(null);
   const tokenChangeRef = useRef(onTokenChange);
@@ -1447,7 +1481,7 @@ function TurnstileWidget({ siteKey, resetNonce, onTokenChange }) {
         containerRef.current.innerHTML = "";
         widgetIdRef.current = turnstile.render(containerRef.current, {
           sitekey: siteKey,
-          theme: "light",
+          theme: themeMode === "dark" ? "dark" : "light",
           callback: (token) => tokenChangeRef.current(token || ""),
           "expired-callback": () => tokenChangeRef.current(""),
           "error-callback": () => tokenChangeRef.current(""),
@@ -1469,7 +1503,7 @@ function TurnstileWidget({ siteKey, resetNonce, onTokenChange }) {
         containerRef.current.innerHTML = "";
       }
     };
-  }, [siteKey]);
+  }, [siteKey, themeMode]);
 
   useEffect(() => {
     if (!siteKey) return;
@@ -1509,6 +1543,7 @@ function AuthScreen({
   onOpenRegister,
   onOpenForgot,
   recoveryEmail,
+  themeMode,
 }) {
   const isRegister = mode === "register";
   const isForgot = mode === "forgot";
@@ -1529,7 +1564,7 @@ function AuthScreen({
   const submitLabel = busy ? "提交中..." : isRegister ? "注册并进入" : isForgot ? "发送重置邮件" : isReset ? "更新密码" : "登录";
 
   return (
-    <div className="min-h-screen bg-zinc-100 px-4 py-10 text-zinc-900">
+    <div className={classNames("min-h-screen bg-zinc-100 px-4 py-10 text-zinc-900", themeMode === "dark" ? "theme-dark" : "theme-light")}>
       <div className="mx-auto max-w-5xl">
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1.2fr)_420px]">
           <div className="rounded-[2rem] border border-zinc-200 bg-white p-8 shadow-sm">
@@ -1637,7 +1672,7 @@ function AuthScreen({
               {requiresCaptcha ? (
                 <div className="space-y-2">
                   <div className="text-sm font-medium text-zinc-700">安全验证</div>
-                  <TurnstileWidget siteKey={TURNSTILE_SITE_KEY} resetNonce={captchaResetNonce} onTokenChange={onCaptchaChange} />
+                  <TurnstileWidget siteKey={TURNSTILE_SITE_KEY} resetNonce={captchaResetNonce} onTokenChange={onCaptchaChange} themeMode={themeMode} />
                 </div>
               ) : null}
 
@@ -1838,6 +1873,10 @@ function ChangeEmailModal({ open, currentEmail, isLegacyEmail, form, error, info
 export default function SemesterStudyHub() {
   const [courses, setCourses] = useState([]);
   const [reviews, setReviews] = useState([]);
+  const [themeMode, setThemeMode] = useState(() => {
+    if (typeof window === "undefined") return "light";
+    return window.localStorage.getItem(THEME_STORAGE_KEY) === "dark" ? "dark" : "light";
+  });
   const [session, setSession] = useState(null);
   const [authResolved, setAuthResolved] = useState(!isSupabaseConfigured);
   const [authMode, setAuthMode] = useState("login");
@@ -1848,6 +1887,7 @@ export default function SemesterStudyHub() {
   const [captchaToken, setCaptchaToken] = useState("");
   const [captchaResetNonce, setCaptchaResetNonce] = useState(0);
   const [showAccountMenu, setShowAccountMenu] = useState(false);
+  const [showPageNavDrawer, setShowPageNavDrawer] = useState(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
   const [showChangeEmailModal, setShowChangeEmailModal] = useState(false);
   const [changePasswordForm, setChangePasswordForm] = useState({ password: "", confirmPassword: "" });
@@ -1858,6 +1898,11 @@ export default function SemesterStudyHub() {
   const [changeEmailError, setChangeEmailError] = useState("");
   const [changeEmailInfo, setChangeEmailInfo] = useState("");
   const [changeEmailSubmitting, setChangeEmailSubmitting] = useState(false);
+  const [profileForm, setProfileForm] = useState({ nickname: "", avatarUrl: "" });
+  const [profileError, setProfileError] = useState("");
+  const [profileInfo, setProfileInfo] = useState("");
+  const [profileSubmitting, setProfileSubmitting] = useState(false);
+  const [accountSection, setAccountSection] = useState("profile");
   const [selectedCourseId, setSelectedCourseId] = useState(null);
   const [selectedReviewId, setSelectedReviewId] = useState(null);
   const [query, setQuery] = useState("");
@@ -1913,6 +1958,7 @@ export default function SemesterStudyHub() {
   const fileDragDepthRef = useRef(0);
   const reviewFileInputRef = useRef(null);
   const reviewFileDragDepthRef = useRef(0);
+  const avatarInputRef = useRef(null);
   const accountMenuRef = useRef(null);
   const bootstrapStartedRef = useRef("");
   const legacyFileMigrationStartedRef = useRef("");
@@ -1923,6 +1969,10 @@ export default function SemesterStudyHub() {
   const currentUsername = currentUser?.user_metadata?.username || authEmailToUsername(currentUser?.email || "");
   const currentUserEmail = currentUser?.email || "";
   const currentUserHasLegacyEmail = isLegacyAuthEmail(currentUserEmail);
+  const currentUserNickname = currentUser?.user_metadata?.nickname || "";
+  const currentUserAvatarUrl = currentUser?.user_metadata?.avatar_url || "";
+  const currentDisplayName = currentUserNickname || currentUsername || authEmailToUsername(currentUserEmail) || "用户";
+  const currentAccountInitial = currentDisplayName.slice(0, 1).toUpperCase();
   const storageScope = isSupabaseConfigured ? currentUserId : "";
   const courseStorageKey = useMemo(() => getScopedStorageKey(STORAGE_KEY, storageScope), [storageScope]);
   const reviewStorageKey = useMemo(() => getScopedStorageKey(REVIEW_STORAGE_KEY, storageScope), [storageScope]);
@@ -1982,6 +2032,23 @@ export default function SemesterStudyHub() {
       setAuthInfo("请设置一个新的密码。");
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+    document.documentElement.style.colorScheme = themeMode === "dark" ? "dark" : "light";
+    document.body.style.backgroundColor = themeMode === "dark" ? "#07111f" : "#f4f4f5";
+    document.body.style.color = themeMode === "dark" ? "#f5f7ff" : "#18181b";
+  }, [themeMode]);
+
+  useEffect(() => {
+    setProfileForm({
+      nickname: currentUserNickname,
+      avatarUrl: currentUserAvatarUrl,
+    });
+    setProfileError("");
+    setProfileInfo("");
+  }, [currentUserNickname, currentUserAvatarUrl, currentUserId]);
 
   useEffect(() => {
     if (isSupabaseConfigured && !authResolved) return undefined;
@@ -2956,6 +3023,168 @@ export default function SemesterStudyHub() {
       filesCount,
     };
   }, [activeReviewItems, archivedReviewItems.length, reviews]);
+  const accountSectionItems = [
+    { id: "profile", label: "个人资料", icon: <User className="h-4 w-4" /> },
+    { id: "security", label: "账户安全", icon: <Shield className="h-4 w-4" /> },
+    { id: "preferences", label: "偏好设置", icon: <Palette className="h-4 w-4" /> },
+    { id: "about", label: "关于与退出", icon: <Info className="h-4 w-4" /> },
+  ];
+  const emailConfirmedAt = currentUser?.email_confirmed_at || currentUser?.confirmed_at || "";
+  const joinedAtLabel = currentUser?.created_at ? formatDateTime(currentUser.created_at) : "未记录";
+  const lastSignInLabel = currentUser?.last_sign_in_at ? formatDateTime(currentUser.last_sign_in_at) : "未记录";
+  const activeAccountSectionContent =
+    accountSection === "security" ? (
+      <div className="space-y-4">
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-5">
+            <div className="text-sm font-semibold text-zinc-900">邮箱确认状态</div>
+            <div className="mt-3 inline-flex rounded-full bg-emerald-100 px-3 py-2 text-xs font-medium text-emerald-700">
+              {emailConfirmedAt ? `已确认 · ${formatDateTime(emailConfirmedAt)}` : "尚未确认"}
+            </div>
+            <div className="mt-3 text-sm leading-6 text-zinc-500">开启 `Confirm email` 后，新账号需要先完成邮箱确认才能正式登录。</div>
+          </div>
+          <div className="rounded-3xl border border-zinc-200 bg-zinc-50 p-5">
+            <div className="text-sm font-semibold text-zinc-900">密码与恢复</div>
+            <div className="mt-3 text-sm leading-6 text-zinc-500">已支持站内修改密码，也支持通过注册邮箱发送忘记密码邮件。</div>
+          </div>
+        </div>
+
+        {currentUserHasLegacyEmail ? (
+          <div className="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm leading-6 text-amber-900">
+            当前账号仍是旧版内部邮箱。建议先去“修改绑定邮箱”，换成真实邮箱，再使用忘记密码邮件找回。
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap gap-3">
+          <MotionButton onClick={openChangePasswordModal} className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+            修改密码
+          </MotionButton>
+          <MotionButton onClick={openChangeEmailModal} className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+            修改绑定邮箱
+          </MotionButton>
+        </div>
+      </div>
+    ) : accountSection === "preferences" ? (
+      <div className="space-y-4">
+        <div className="rounded-3xl border border-zinc-200 bg-white p-5">
+          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900">
+            <Settings2 className="h-4 w-4" />
+            主题颜色
+          </div>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => setThemeMode("light")}
+              className={classNames(
+                "inline-flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-medium transition",
+                themeMode === "light" ? "border-zinc-900 bg-zinc-900 text-white" : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-white"
+              )}
+            >
+              <Sun className="h-4 w-4" />
+              浅色模式
+            </button>
+            <button
+              type="button"
+              onClick={() => setThemeMode("dark")}
+              className={classNames(
+                "inline-flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-medium transition",
+                themeMode === "dark" ? "border-zinc-900 bg-zinc-900 text-white" : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-white"
+              )}
+            >
+              <Moon className="h-4 w-4" />
+              深色模式
+            </button>
+          </div>
+          <div className="mt-4 text-sm leading-6 text-zinc-500">主题会保存在当前浏览器，下次打开时保持你上一次的选择。</div>
+        </div>
+      </div>
+    ) : accountSection === "about" ? (
+      <div className="space-y-4">
+        <div className="rounded-3xl border border-zinc-200 bg-white p-5">
+          <div className="text-sm font-semibold text-zinc-900">关于这个学习空间</div>
+          <div className="mt-3 text-sm leading-7 text-zinc-500">
+            Semester Study Hub 负责管理课程、每周状态、复习模块和资料上传。用户中心把账号资料、安全设置、主题偏好和支持入口放到一起，便于统一管理。
+          </div>
+        </div>
+        <div className="rounded-3xl border border-zinc-200 bg-white p-5">
+          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900">
+            <Mail className="h-4 w-4" />
+            Support
+          </div>
+          <a href={`mailto:${SUPPORT_EMAIL}`} className="mt-3 inline-flex rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-white">
+            {SUPPORT_EMAIL}
+          </a>
+        </div>
+        <MotionButton onClick={() => runWithStatusGuard(() => logoutUser())} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+          <LogOut className="h-4 w-4" />
+          退出当前账号
+        </MotionButton>
+      </div>
+    ) : (
+      <div className="space-y-4">
+        <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
+          <div className="rounded-[2rem] border border-zinc-200 bg-white p-5">
+            <div className="flex flex-col items-center text-center">
+              <AccountAvatar src={profileForm.avatarUrl || currentUserAvatarUrl} label={currentDisplayName} className="h-24 w-24 border border-zinc-200" textClassName="text-2xl" />
+              <div className="mt-4 text-lg font-semibold text-zinc-950">{currentDisplayName}</div>
+              <div className="mt-1 text-sm text-zinc-500">{currentUserEmail}</div>
+              <div className="mt-4 flex flex-wrap justify-center gap-2">
+                <MotionButton onClick={() => avatarInputRef.current?.click()} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+                  <ImagePlus className="h-4 w-4" />
+                  上传头像
+                </MotionButton>
+                <MotionButton onClick={removeProfileAvatar} className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                  移除头像
+                </MotionButton>
+                <input ref={avatarInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarFileChange} />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-[2rem] border border-zinc-200 bg-white p-5">
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="block md:col-span-2">
+                <div className="mb-2 text-sm font-medium text-zinc-700">昵称</div>
+                <input
+                  value={profileForm.nickname}
+                  onChange={(event) => updateProfileForm("nickname", event.target.value)}
+                  placeholder="你希望展示给别人的名字"
+                  className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                />
+              </label>
+              <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+                <div className="text-xs font-medium text-zinc-500">账号名</div>
+                <div className="mt-2 font-medium text-zinc-900">{currentUsername || "未设置"}</div>
+              </div>
+              <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+                <div className="text-xs font-medium text-zinc-500">注册时间</div>
+                <div className="mt-2 font-medium text-zinc-900">{joinedAtLabel}</div>
+              </div>
+              <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+                <div className="text-xs font-medium text-zinc-500">最近登录</div>
+                <div className="mt-2 font-medium text-zinc-900">{lastSignInLabel}</div>
+              </div>
+              <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+                <div className="text-xs font-medium text-zinc-500">绑定邮箱</div>
+                <div className="mt-2 font-medium text-zinc-900">{currentUserEmail}</div>
+              </div>
+            </div>
+
+            {profileError ? <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{profileError}</div> : null}
+            {profileInfo ? <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{profileInfo}</div> : null}
+
+            <div className="mt-5 flex flex-wrap gap-3">
+              <MotionButton onClick={saveProfileSettings} disabled={profileSubmitting} className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400">
+                {profileSubmitting ? "保存中..." : "保存个人资料"}
+              </MotionButton>
+              <MotionButton onClick={() => openAccountCenter("security")} className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                去看账户安全
+              </MotionButton>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   async function commitCourses(nextCourses, deletedCourseIds = []) {
     setCourses(nextCourses);
     if (!isSupabaseConfigured || !supabase) return nextCourses;
@@ -3060,6 +3289,79 @@ export default function SemesterStudyHub() {
     resetCaptchaChallenge();
   }
 
+  function updateProfileForm(field, value) {
+    setProfileForm((prev) => ({ ...prev, [field]: value }));
+    if (profileError) setProfileError("");
+    if (profileInfo) setProfileInfo("");
+  }
+
+  async function handleAvatarFileChange(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setProfileError("头像必须是图片文件。");
+      return;
+    }
+    if (file.size > 1.5 * 1024 * 1024) {
+      setProfileError("头像文件请控制在 1.5 MB 以内。");
+      return;
+    }
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      updateProfileForm("avatarUrl", dataUrl);
+      setProfileInfo("新头像已载入，记得点击保存个人资料。");
+    } catch (error) {
+      setProfileError(error?.message || "头像读取失败，请稍后再试。");
+    }
+  }
+
+  function removeProfileAvatar() {
+    updateProfileForm("avatarUrl", "");
+    setProfileInfo("头像已移除，记得点击保存个人资料。");
+  }
+
+  async function saveProfileSettings() {
+    if (!supabase || !currentUser) return;
+
+    const nickname = profileForm.nickname.trim();
+    if (!nickname) {
+      setProfileError("昵称不能为空。");
+      return;
+    }
+    if (nickname.length > 32) {
+      setProfileError("昵称请控制在 32 个字符以内。");
+      return;
+    }
+
+    setProfileSubmitting(true);
+    setProfileError("");
+    setProfileInfo("");
+
+    try {
+      const nextUserMetadata = {
+        ...(currentUser.user_metadata || {}),
+        nickname,
+        avatar_url: profileForm.avatarUrl || "",
+      };
+      const { data, error } = await supabase.auth.updateUser({
+        data: nextUserMetadata,
+      });
+      if (error) throw error;
+
+      if (data?.user) {
+        setSession((prev) => (prev ? { ...prev, user: data.user } : prev));
+      }
+      setProfileInfo("个人资料已更新。");
+      setToastMessage("个人资料已更新。");
+    } catch (error) {
+      setProfileError(error?.message || "保存个人资料失败，请稍后再试。");
+    } finally {
+      setProfileSubmitting(false);
+    }
+  }
+
   function updateChangePasswordForm(field, value) {
     setChangePasswordForm((prev) => ({ ...prev, [field]: value }));
     if (changePasswordError) setChangePasswordError("");
@@ -3092,6 +3394,12 @@ export default function SemesterStudyHub() {
     setChangeEmailError("");
     setChangeEmailInfo("");
     setShowChangeEmailModal(true);
+  }
+
+  function openAccountCenter(section = "profile") {
+    setShowAccountMenu(false);
+    setAccountSection(section);
+    navigateToPage("account");
   }
 
   function openChangePasswordModal() {
@@ -3305,6 +3613,8 @@ export default function SemesterStudyHub() {
       setChangeEmailForm({ email: "" });
       setChangeEmailError("");
       setChangeEmailInfo("");
+      setProfileError("");
+      setProfileInfo("");
     } catch (error) {
       console.error("Failed to sign out.", error);
       window.alert("退出登录失败。");
@@ -3600,6 +3910,7 @@ export default function SemesterStudyHub() {
     runWithStatusGuard(() => {
       if (nextPage !== "courseDetail") setActiveCourseDetailPanel(null);
       if (nextPage !== "reviewDetail") setActiveReviewDetailPanel(null);
+      setShowPageNavDrawer(false);
       setPage(nextPage);
     });
   }
@@ -4722,23 +5033,22 @@ export default function SemesterStudyHub() {
         onOpenRegister={openRegisterMode}
         onOpenForgot={openForgotPasswordMode}
         recoveryEmail={currentUserEmail || normalizeAuthEmail(authForm.email)}
+        themeMode={themeMode}
       />
     );
   }
 
   return (
-    <div className="min-h-screen bg-zinc-100 text-zinc-900">
+    <div className={classNames("min-h-screen bg-zinc-100 text-zinc-900 transition-colors", themeMode === "dark" ? "theme-dark" : "theme-light")}>
       {isSupabaseConfigured ? (
         <div ref={accountMenuRef} className="fixed right-3 top-3 z-[70] sm:right-6 sm:top-6">
           <MotionButton
             onClick={() => setShowAccountMenu((prev) => !prev)}
             className="flex items-center gap-2 rounded-full border border-zinc-200 bg-white/95 px-2.5 py-2 shadow-lg backdrop-blur hover:bg-white sm:gap-3 sm:px-3"
           >
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-900 text-sm font-semibold text-white">
-              {(currentUsername || "U").slice(0, 1).toUpperCase()}
-            </div>
+            <AccountAvatar src={currentUserAvatarUrl} label={currentDisplayName} className="h-10 w-10" textClassName="text-sm" />
             <div className="hidden min-w-0 text-left sm:block">
-              <div className="max-w-[150px] truncate text-sm font-semibold text-zinc-900">{currentUsername || "未命名用户"}</div>
+              <div className="max-w-[150px] truncate text-sm font-semibold text-zinc-900">{currentDisplayName || "未命名用户"}</div>
               <div className="max-w-[150px] truncate text-xs text-zinc-500">{currentUserEmail || "个人账户"}</div>
             </div>
             <ChevronDown className={classNames("h-4 w-4 text-zinc-500 transition", showAccountMenu ? "rotate-180" : "")} />
@@ -4754,11 +5064,9 @@ export default function SemesterStudyHub() {
                 className="mt-3 w-[min(18rem,calc(100vw-1.5rem))] rounded-3xl border border-zinc-200 bg-white p-3.5 shadow-2xl sm:w-[280px] sm:p-4"
               >
                 <div className="flex items-center gap-3">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 text-base font-semibold text-white">
-                    {(currentUsername || "U").slice(0, 1).toUpperCase()}
-                  </div>
+                  <AccountAvatar src={currentUserAvatarUrl} label={currentDisplayName} className="h-12 w-12" textClassName="text-base" />
                   <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold text-zinc-900">{currentUsername || "未命名用户"}</div>
+                    <div className="truncate text-sm font-semibold text-zinc-900">{currentDisplayName || "未命名用户"}</div>
                     <div className="truncate text-xs leading-5 text-zinc-500">{currentUserEmail || "当前登录账户"}</div>
                   </div>
                 </div>
@@ -4773,6 +5081,12 @@ export default function SemesterStudyHub() {
                 ) : null}
 
                 <div className="mt-4 flex flex-col gap-2">
+                  <MotionButton
+                    onClick={() => openAccountCenter("profile")}
+                    className="inline-flex items-center justify-center rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800"
+                  >
+                    进入用户中心
+                  </MotionButton>
                   <MotionButton
                     onClick={openChangeEmailModal}
                     className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
@@ -4831,6 +5145,49 @@ export default function SemesterStudyHub() {
         onClose={closeChangeEmailModal}
         onSubmit={handleChangeEmailSubmit}
       />
+      {!isBootstrapping ? (
+        <div className="fixed left-1/2 top-3 z-[65] -translate-x-1/2" onMouseEnter={() => setShowPageNavDrawer(true)} onMouseLeave={() => setShowPageNavDrawer(false)}>
+          <button
+            type="button"
+            onClick={() => setShowPageNavDrawer((prev) => !prev)}
+            className="rounded-full border border-zinc-200 bg-white/95 px-5 py-2.5 text-sm font-semibold text-zinc-700 shadow-lg backdrop-blur transition hover:bg-white"
+          >
+            导航
+          </button>
+          <AnimatePresence>
+            {showPageNavDrawer ? (
+              <motion.aside
+                  initial={{ y: -10, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  exit={{ y: -10, opacity: 0 }}
+                  transition={{ duration: 0.18 }}
+                  className="mt-3 w-[min(340px,calc(100vw-2rem))] rounded-[2rem] border border-zinc-200 bg-white p-4 shadow-2xl"
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-semibold text-zinc-900">快速导航</div>
+                      <div className="mt-1 text-sm leading-6 text-zinc-500">鼠标移入展开，选中页面后会自动收起。</div>
+                    </div>
+                    <button type="button" onClick={() => setShowPageNavDrawer(false)} className="rounded-full p-2 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900">
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  <div className="mt-4 flex flex-col gap-2">
+                    <NavTab active={page === "overview"} icon={<LayoutDashboard className="h-4 w-4" />} label="总览" onClick={() => navigateToPage("overview")} />
+                    <NavTab active={page === "courses" || page === "courseDetail"} icon={<BookOpen className="h-4 w-4" />} label="本学期课程" onClick={() => navigateToPage("courses")} />
+                    <NavTab active={page === "status"} icon={<CalendarDays className="h-4 w-4" />} label="课程状态" onClick={() => navigateToPage("status")} />
+                    <NavTab active={page === "reviews" || page === "reviewDetail"} icon={<ClipboardList className="h-4 w-4" />} label="复习模块" onClick={() => navigateToPage("reviews")} />
+                    <NavTab active={page === "reviewStatus"} icon={<CheckCircle2 className="h-4 w-4" />} label="复习状态" onClick={() => navigateToPage("reviewStatus")} />
+                    <NavTab active={page === "archive"} icon={<Archive className="h-4 w-4" />} label="过往课程" onClick={() => navigateToPage("archive")} />
+                    <NavTab active={page === "reviewArchive"} icon={<Archive className="h-4 w-4" />} label="过往复习" onClick={() => navigateToPage("reviewArchive")} />
+                    <NavTab active={page === "account"} icon={<User className="h-4 w-4" />} label="用户中心" onClick={() => navigateToPage("account")} />
+                  </div>
+                </motion.aside>
+            ) : null}
+          </AnimatePresence>
+        </div>
+      ) : null}
       <div className="mx-auto max-w-7xl p-4 md:p-6">
         {!isBootstrapping && page === "overview" ? (
           <div className="mb-6 rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm">
@@ -4846,22 +5203,6 @@ export default function SemesterStudyHub() {
                 </p>
               </div>
             </div>
-          </div>
-        ) : null}
-
-        {!isBootstrapping ? (
-          <div className="mb-6">
-            <SectionCard title="页面导航" subtitle="这里保留所有页面入口，切换页面时会一直显示。">
-              <div className="flex flex-wrap items-center gap-3">
-                <NavTab active={page === "overview"} icon={<LayoutDashboard className="h-4 w-4" />} label="总览" onClick={() => navigateToPage("overview")} />
-                <NavTab active={page === "courses" || page === "courseDetail"} icon={<BookOpen className="h-4 w-4" />} label="本学期课程" onClick={() => navigateToPage("courses")} />
-                <NavTab active={page === "status"} icon={<CalendarDays className="h-4 w-4" />} label="课程状态" onClick={() => navigateToPage("status")} />
-                <NavTab active={page === "reviews" || page === "reviewDetail"} icon={<ClipboardList className="h-4 w-4" />} label="复习模块" onClick={() => navigateToPage("reviews")} />
-                <NavTab active={page === "reviewStatus"} icon={<CheckCircle2 className="h-4 w-4" />} label="复习状态" onClick={() => navigateToPage("reviewStatus")} />
-                <NavTab active={page === "archive"} icon={<Archive className="h-4 w-4" />} label="过往课程" onClick={() => navigateToPage("archive")} />
-                <NavTab active={page === "reviewArchive"} icon={<Archive className="h-4 w-4" />} label="过往复习" onClick={() => navigateToPage("reviewArchive")} />
-              </div>
-            </SectionCard>
           </div>
         ) : null}
 
@@ -4943,6 +5284,44 @@ export default function SemesterStudyHub() {
               )}
             </SectionCard>
           </div>
+        ) : null}
+
+        {!isBootstrapping && page === "account" ? (
+          <SectionCard title="用户中心" subtitle="集中管理个人资料、账户安全、主题偏好和支持信息。">
+            <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+              <div className="rounded-[2rem] border border-zinc-200 bg-zinc-50 p-3">
+                <div className="mb-3 rounded-3xl border border-zinc-200 bg-white p-4">
+                  <div className="flex items-center gap-3">
+                    <AccountAvatar src={currentUserAvatarUrl} label={currentDisplayName} className="h-14 w-14 border border-zinc-200" textClassName="text-lg" />
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold text-zinc-900">{currentDisplayName}</div>
+                      <div className="truncate text-xs text-zinc-500">{currentUserEmail}</div>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-2">
+                  {accountSectionItems.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setAccountSection(item.id)}
+                      className={classNames(
+                        "inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-left text-sm font-medium transition",
+                        accountSection === item.id ? "bg-zinc-900 text-white" : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100"
+                      )}
+                    >
+                      {item.icon}
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-[2rem] border border-zinc-200 bg-white p-5">
+                {activeAccountSectionContent}
+              </div>
+            </div>
+          </SectionCard>
         ) : null}
 
         {!isBootstrapping && page === "status" ? (
