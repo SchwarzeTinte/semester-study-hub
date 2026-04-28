@@ -32,6 +32,8 @@ import {
   User,
   X,
 } from "lucide-react";
+import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 import "./App.css";
 
@@ -54,6 +56,44 @@ const FILE_CATEGORIES = ["课堂文件", "笔记", "作业", "其他"];
 const TIME_RANGE_REGEX = /^([01]?\d|2[0-3]):([0-5]\d)\s*-\s*([01]?\d|2[0-3]):([0-5]\d)$/;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const STORAGE_BUCKET = "study-files";
+
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+const IMPORT_WEEKDAY_ALIASES = {
+  montag: "Montag",
+  monday: "Montag",
+  mon: "Montag",
+  星期一: "Montag",
+  周一: "Montag",
+  dienstag: "Dienstag",
+  tuesday: "Dienstag",
+  tue: "Dienstag",
+  tues: "Dienstag",
+  星期二: "Dienstag",
+  周二: "Dienstag",
+  mittwoch: "Mittwoch",
+  wednesday: "Mittwoch",
+  wed: "Mittwoch",
+  星期三: "Mittwoch",
+  周三: "Mittwoch",
+  donnerstag: "Donnerstag",
+  thursday: "Donnerstag",
+  thu: "Donnerstag",
+  thur: "Donnerstag",
+  thurs: "Donnerstag",
+  星期四: "Donnerstag",
+  周四: "Donnerstag",
+  freitag: "Freitag",
+  friday: "Freitag",
+  fri: "Freitag",
+  星期五: "Freitag",
+  周五: "Freitag",
+};
+const COURSE_KIND_PATTERNS = [
+  { pattern: /vorlesung|lecture/i, value: "Vorlesung" },
+  { pattern: /übung|uebung|exercise|tutorial/i, value: "Übung" },
+  { pattern: /seminar/i, value: "Seminar" },
+  { pattern: /praktikum|lab/i, value: "Praktikum" },
+];
 
 const STARTER_COURSES = [
   { name: "Multimediaprogrammierung", kind: "Vorlesung", weekday: "Montag", time: "10:00-12:00", room: "S 002 · Schellingstr. 3" },
@@ -140,6 +180,381 @@ function isLegacyAuthEmail(email = "") {
   return normalizeAuthEmail(email).endsWith(`@${LEGACY_AUTH_EMAIL_DOMAIN}`);
 }
 
+function normalizeImportWeekday(token = "") {
+  return IMPORT_WEEKDAY_ALIASES[token.trim().toLowerCase()] || "";
+}
+
+function parseImportTimeRange(value = "") {
+  const match = value.match(/([01]?\d|2[0-3]):([0-5]\d)\s*[-–—~]\s*([01]?\d|2[0-3]):([0-5]\d)/);
+  if (!match) return "";
+  return `${match[1].padStart(2, "0")}:${match[2]} - ${match[3].padStart(2, "0")}:${match[4]}`;
+}
+
+function inferCourseKind(value = "") {
+  const matched = COURSE_KIND_PATTERNS.find((entry) => entry.pattern.test(value));
+  return matched?.value || "";
+}
+
+function looksLikeRoomToken(value = "") {
+  return /(raum|room|hörsaal|auditorium|[a-z]\s?\d{2,3}|[a-z]-?\d{2,3}|\b\d{2,3}\b)/i.test(value);
+}
+
+function normalizeImportedTextValue(value = "") {
+  return value
+    .replace(/\.{3,}/g, " ")
+    .replace(/[\u2026]+/g, " ")
+    .replace(/-\s+/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s*·\s*/g, " · ")
+    .trim();
+}
+
+function isImportDateRangeLine(value = "") {
+  return /\d{2}\.\d{2}\.\d{4}\s+\d{2}\.\d{2}\.\d{4}/.test(value);
+}
+
+function isImportStandaloneTimeLine(value = "") {
+  return /^\d{2}:\d{2}$/.test(value.trim());
+}
+
+function isImportSeparatorLine(value = "") {
+  return /^\.{3,}$/.test(value.trim());
+}
+
+function isImportFooterLine(value = "") {
+  return /^(seite\s*\d+|(?:\d+\s+)?tägl\.|einzel|wöchentlich|block|buchungen)$/i.test(value.trim());
+}
+
+function stripImportAxisPrefix(value = "") {
+  return value.replace(/^(\d{2}:\d{2})\s{2,}(?=\S)/, "").trim();
+}
+
+function getPrimaryImportSegment(value = "") {
+  const stripped = stripImportAxisPrefix(value);
+  if (!stripped) return "";
+  const parts = stripped
+    .split(/\s{3,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts[0] || "";
+}
+
+function looksLikeImportStreetLine(value = "") {
+  return /(str\.|straße|platz|pl\.|aula|audimax|geschw\.|scholl|leopold|schelling|oettingen|amalien)/i.test(value);
+}
+
+function isImportProgramNoiseLine(value = "") {
+  const normalized = normalizeImportedTextValue(value);
+  if (!normalized) return false;
+  if ((normalized.match(/,/g) || []).length >= 2) return true;
+  return /(medieninf|informat(?:ik|i)?|informa\b|infanw|la informa|stat\.u|kü\.intel|soziolog|me-co-int|arbeitsl|physics|wirt-|schaf\.)/i.test(normalized);
+}
+
+function isLikelyImportTitleLine(value = "") {
+  const normalized = getPrimaryImportSegment(value);
+  if (!normalized) return false;
+  if (isImportSeparatorLine(normalized) || isImportFooterLine(normalized)) return false;
+  if (isImportStandaloneTimeLine(normalized) || isImportDateRangeLine(normalized) || parseImportTimeRange(normalized)) return false;
+  if (isImportProgramNoiseLine(normalized)) return false;
+  if (/^stundenplan:/i.test(normalized)) return false;
+  if (!/[A-Za-zÄÖÜäöüß]/.test(normalized)) return false;
+  if (looksLikeRoomToken(normalized) && /\(|\d/.test(normalized) && normalized.length <= 28) return false;
+  return true;
+}
+
+function looksLikeImportLocationLine(value = "") {
+  const normalized = getPrimaryImportSegment(value);
+  if (!normalized) return false;
+  if (isImportSeparatorLine(normalized) || isImportFooterLine(normalized)) return false;
+  if (isImportDateRangeLine(normalized) || parseImportTimeRange(normalized) || isImportProgramNoiseLine(normalized)) return false;
+  return looksLikeRoomToken(normalized) || /\([A-Z]\)/.test(normalized) || looksLikeImportStreetLine(normalized) || /\d/.test(normalized) && /[A-Za-zÄÖÜäöüß]/.test(normalized);
+}
+
+function collectImportTitleLines(lines = [], anchorIndex = -1) {
+  const collected = [];
+  for (let cursor = anchorIndex; cursor >= Math.max(0, anchorIndex - 4); cursor -= 1) {
+    const candidate = getPrimaryImportSegment(lines[cursor] || "");
+    if (!candidate || isImportSeparatorLine(candidate)) {
+      if (collected.length) break;
+      continue;
+    }
+    if (isImportDateRangeLine(candidate) || parseImportTimeRange(candidate) || isImportStandaloneTimeLine(candidate) || looksLikeImportLocationLine(candidate)) {
+      break;
+    }
+    if (isImportProgramNoiseLine(candidate)) {
+      if (collected.length) break;
+      continue;
+    }
+    if (!isLikelyImportTitleLine(candidate)) {
+      if (collected.length) break;
+      continue;
+    }
+    collected.unshift(candidate);
+    if (collected.length >= 4) break;
+  }
+  return collected;
+}
+
+function collectImportLocationLines(lines = [], anchorIndex = -1) {
+  const collected = [];
+  for (let cursor = anchorIndex; cursor < Math.min(lines.length, anchorIndex + 4); cursor += 1) {
+    const candidate = getPrimaryImportSegment(lines[cursor] || "");
+    if (!candidate || isImportSeparatorLine(candidate)) break;
+    if (isImportDateRangeLine(candidate) || parseImportTimeRange(candidate) || isImportStandaloneTimeLine(candidate)) break;
+    if (isImportProgramNoiseLine(candidate) || isLikelyImportTitleLine(candidate)) {
+      if (collected.length) break;
+      continue;
+    }
+    if (!looksLikeImportLocationLine(candidate)) {
+      if (collected.length) break;
+      continue;
+    }
+    collected.push(candidate);
+    if (collected.length >= 2) break;
+  }
+  return collected;
+}
+
+function mergeImportedCourses(entries = []) {
+  const mergedMap = new Map();
+
+  entries.forEach((entry) => {
+    const key = [entry.name, entry.kind, entry.teacher, entry.room].join("::").toLowerCase();
+    const existing = mergedMap.get(key);
+    if (existing) {
+      const existingScheduleKeys = new Set(existing.scheduleEntries.map((item) => `${item.weekday}-${item.time}`));
+      entry.scheduleEntries.forEach((scheduleEntry) => {
+        const scheduleKey = `${scheduleEntry.weekday}-${scheduleEntry.time}`;
+        if (!existingScheduleKeys.has(scheduleKey)) {
+          existing.scheduleEntries.push(scheduleEntry);
+          existingScheduleKeys.add(scheduleKey);
+        }
+      });
+    } else {
+      mergedMap.set(key, {
+        ...entry,
+        scheduleEntries: [...entry.scheduleEntries],
+      });
+    }
+  });
+
+  return Array.from(mergedMap.values());
+}
+
+function parseCourseImportBlocksFromDay(day, lines = []) {
+  const parsedEntries = [];
+  const skippedLines = [];
+  const normalizedLines = lines
+    .map((line) => getPrimaryImportSegment(line.trim()))
+    .filter((line) => line && !isImportFooterLine(line) && !/^stundenplan:/i.test(line));
+
+  for (let index = 0; index < normalizedLines.length; index += 1) {
+    const currentLine = normalizedLines[index];
+    const time = parseImportTimeRange(currentLine);
+    if (!time) continue;
+
+    let dateIndex = -1;
+    for (let cursor = index - 1; cursor >= Math.max(0, index - 5); cursor -= 1) {
+      if (isImportDateRangeLine(normalizedLines[cursor])) {
+        dateIndex = cursor;
+        break;
+      }
+    }
+
+    const titleAnchor = dateIndex >= 0 ? dateIndex - 1 : index - 1;
+    const titleCandidates = collectImportTitleLines(normalizedLines, titleAnchor);
+
+    const name = normalizeImportedTextValue(titleCandidates.join(" "));
+    if (!name) {
+      skippedLines.push(
+        normalizedLines
+          .slice(Math.max(0, titleAnchor - 2), Math.min(normalizedLines.length, index + 3))
+          .join(" | ")
+      );
+      continue;
+    }
+
+    const roomCandidates = collectImportLocationLines(normalizedLines, index + 1);
+
+    const room = normalizeImportedTextValue(roomCandidates.slice(0, 2).join(" · "));
+    parsedEntries.push({
+      name,
+      kind: inferCourseKind(name) || "Vorlesung",
+      teacher: "",
+      room,
+      scheduleEntries: [{ weekday: day, time }],
+      sourceLine: normalizedLines
+        .slice(Math.max(0, titleAnchor - 1), Math.min(normalizedLines.length, index + 4))
+        .join(" | "),
+    });
+  }
+
+  return { courses: mergeImportedCourses(parsedEntries), skippedLines };
+}
+
+function parseCourseImportGrid(text = "") {
+  const lines = text.split(/\r?\n/);
+  const headerIndex = lines.findIndex((line) => DAY_ORDER.filter((day) => line.includes(day)).length >= 3);
+  if (headerIndex === -1) {
+    return { courses: [], skippedLines: [] };
+  }
+
+  const headerLine = lines[headerIndex];
+  const headers = DAY_ORDER.map((day) => ({ day, start: headerLine.indexOf(day) })).filter((item) => item.start >= 0);
+  if (headers.length < 3) {
+    return { courses: [], skippedLines: [] };
+  }
+
+  const columns = headers.map((header, index) => ({
+    day: header.day,
+    start: header.start,
+    end: index < headers.length - 1 ? headers[index + 1].start : Math.max(headerLine.length, ...lines.map((line) => line.length)) + 1,
+  }));
+
+  const parsedEntries = [];
+  const skippedLines = [];
+
+  columns.forEach((column) => {
+    const dayLines = lines.slice(headerIndex + 1).map((line) => line.slice(column.start, column.end).trimRight());
+    const result = parseCourseImportBlocksFromDay(column.day, dayLines);
+    parsedEntries.push(...result.courses);
+    skippedLines.push(...result.skippedLines);
+  });
+
+  return { courses: mergeImportedCourses(parsedEntries), skippedLines };
+}
+
+function parseCourseImportLines(text = "") {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const parsedEntries = [];
+  const skippedLines = [];
+
+  for (const line of lines) {
+    const weekdayMatch = line.match(/Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Monday|Tuesday|Wednesday|Thursday|Friday|Mon|Tue|Wed|Thu|Fri|星期一|星期二|星期三|星期四|星期五|周一|周二|周三|周四|周五/i);
+    const timeRange = parseImportTimeRange(line);
+    const weekday = normalizeImportWeekday(weekdayMatch?.[0] || "");
+
+    if (!weekday || !timeRange) {
+      skippedLines.push(line);
+      continue;
+    }
+
+    const stripped = line
+      .replace(weekdayMatch[0], " ")
+      .replace(/([01]?\d|2[0-3]):([0-5]\d)\s*[-–—~]\s*([01]?\d|2[0-3]):([0-5]\d)/, " ")
+      .replace(/[，,]/g, " | ")
+      .trim();
+
+    const rawTokens = stripped
+      .split(/\t|;|\|| {2,}/)
+      .map((token) => token.trim())
+      .filter(Boolean);
+
+    if (!rawTokens.length) {
+      skippedLines.push(line);
+      continue;
+    }
+
+    let kind = rawTokens.map(inferCourseKind).find(Boolean) || "Vorlesung";
+    const tokens = rawTokens.filter((token) => {
+      const inferredKind = inferCourseKind(token);
+      if (inferredKind) {
+        kind = inferredKind;
+        return false;
+      }
+      return true;
+    });
+
+    const name = normalizeImportedTextValue(tokens.shift() || "");
+    let room = "";
+    const extras = [];
+    tokens.forEach((token) => {
+      if (!room && looksLikeRoomToken(token)) {
+        room = token;
+      } else {
+        extras.push(token);
+      }
+    });
+
+    if (!name) {
+      skippedLines.push(line);
+      continue;
+    }
+
+    parsedEntries.push({
+      name,
+      kind,
+      teacher: extras.join(" · "),
+      room,
+      scheduleEntries: [{ weekday, time: timeRange }],
+      sourceLine: line,
+    });
+  }
+
+  const mergedMap = new Map();
+  parsedEntries.forEach((entry) => {
+    const key = [entry.name, entry.kind, entry.teacher, entry.room].join("::").toLowerCase();
+    const existing = mergedMap.get(key);
+    if (existing) {
+      const scheduleKey = entry.scheduleEntries[0] ? `${entry.scheduleEntries[0].weekday}-${entry.scheduleEntries[0].time}` : "";
+      const existingKeys = new Set(existing.scheduleEntries.map((item) => `${item.weekday}-${item.time}`));
+      if (scheduleKey && !existingKeys.has(scheduleKey)) {
+        existing.scheduleEntries.push(entry.scheduleEntries[0]);
+      }
+    } else {
+      mergedMap.set(key, { ...entry, scheduleEntries: [...entry.scheduleEntries] });
+    }
+  });
+
+  return {
+    courses: Array.from(mergedMap.values()),
+    skippedLines,
+  };
+}
+
+function parseCourseImportText(text = "") {
+  const gridResult = parseCourseImportGrid(text);
+  if (gridResult.courses.length) return gridResult;
+  return parseCourseImportLines(text);
+}
+
+function buildPdfRowText(rowItems = []) {
+  const sortedItems = [...rowItems].sort((a, b) => a.x - b.x);
+  let line = "";
+  let previousRight = 0;
+  sortedItems.forEach((item, index) => {
+    const gap = item.x - previousRight;
+    if (index > 0 && gap > 4) {
+      line += " ".repeat(Math.max(1, Math.round(gap / 6)));
+    }
+    line += item.str;
+    previousRight = item.x + item.width;
+  });
+  return line.trimEnd();
+}
+
+function buildPdfRows(items = []) {
+  const rows = new Map();
+  items.forEach((item) => {
+    const existingKey = Array.from(rows.keys()).find((key) => Math.abs(key - item.y) < 3);
+    const key = existingKey ?? item.y;
+    if (!rows.has(key)) rows.set(key, []);
+    rows.get(key).push(item);
+  });
+
+  return Array.from(rows.entries())
+    .sort((a, b) => b[0] - a[0])
+    .map(([y, rowItems]) => ({
+      y,
+      items: [...rowItems].sort((a, b) => a.x - b.x),
+      text: buildPdfRowText(rowItems),
+    }));
+}
+
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -147,6 +562,76 @@ function readFileAsDataUrl(file) {
     reader.onerror = () => reject(new Error("头像读取失败，请换一张图片再试。"));
     reader.readAsDataURL(file);
   });
+}
+
+async function extractCourseImportsFromPdfFile(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = getDocument({ data: arrayBuffer });
+  const pdf = await loadingTask.promise;
+  const pageTexts = [];
+  const parsedEntries = [];
+  const skippedLines = [];
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    const items = (textContent.items || [])
+      .filter((item) => typeof item.str === "string" && item.str.trim())
+      .map((item) => ({
+        str: item.str,
+        x: item.transform?.[4] || 0,
+        y: Math.round((item.transform?.[5] || 0) * 10) / 10,
+        width: item.width || 0,
+      }));
+
+    const rows = buildPdfRows(items);
+    pageTexts.push(rows.map((row) => row.text).join("\n"));
+
+    const headerRow = rows.find((row) => DAY_ORDER.filter((day) => row.text.includes(day)).length >= 3);
+    if (!headerRow) continue;
+
+    const headerItems = DAY_ORDER.map((day) => ({
+      day,
+      item: headerRow.items.find((entry) => entry.str.includes(day)),
+    })).filter((entry) => entry.item);
+
+    if (headerItems.length < 3) continue;
+
+    const pageWidth = Math.max(...items.map((item) => item.x + item.width), 0);
+    const columns = headerItems.map((entry, index) => {
+      const start = entry.item.x - 6;
+      const nextStart = index < headerItems.length - 1 ? headerItems[index + 1].item.x - 6 : pageWidth + 6;
+      return {
+        day: entry.day,
+        start,
+        end: nextStart,
+      };
+    });
+
+    const contentRows = rows.filter((row) => row.y < headerRow.y - 2);
+    columns.forEach((column) => {
+      const dayLines = contentRows
+        .map((row) => {
+          const rowItems = row.items.filter((item) => {
+            const center = item.x + item.width / 2;
+            return center >= column.start && center < column.end;
+          });
+          return rowItems.length ? buildPdfRowText(rowItems) : "";
+        })
+        .filter(Boolean);
+
+      const result = parseCourseImportBlocksFromDay(column.day, dayLines);
+      parsedEntries.push(...result.courses);
+      skippedLines.push(...result.skippedLines);
+    });
+  }
+
+  await loadingTask.destroy();
+  return {
+    text: pageTexts.join("\n\n"),
+    courses: mergeImportedCourses(parsedEntries),
+    skippedLines,
+  };
 }
 
 function getScopedStorageKey(baseKey, scope = "") {
@@ -1886,10 +2371,18 @@ export default function SemesterStudyHub() {
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [captchaToken, setCaptchaToken] = useState("");
   const [captchaResetNonce, setCaptchaResetNonce] = useState(0);
-  const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [showPageNavDrawer, setShowPageNavDrawer] = useState(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
   const [showChangeEmailModal, setShowChangeEmailModal] = useState(false);
+  const [showCourseImportModal, setShowCourseImportModal] = useState(false);
+  const [courseImportText, setCourseImportText] = useState("");
+  const [courseImportError, setCourseImportError] = useState("");
+  const [courseImportInfo, setCourseImportInfo] = useState("");
+  const [preparedCourseImportCourses, setPreparedCourseImportCourses] = useState([]);
+  const [preparedCourseImportSkippedLines, setPreparedCourseImportSkippedLines] = useState([]);
+  const [recognizedCourseImports, setRecognizedCourseImports] = useState([]);
+  const [courseImportSkippedLines, setCourseImportSkippedLines] = useState([]);
+  const [isImportingCourses, setIsImportingCourses] = useState(false);
   const [changePasswordForm, setChangePasswordForm] = useState({ password: "", confirmPassword: "" });
   const [changePasswordError, setChangePasswordError] = useState("");
   const [changePasswordInfo, setChangePasswordInfo] = useState("");
@@ -1959,7 +2452,7 @@ export default function SemesterStudyHub() {
   const reviewFileInputRef = useRef(null);
   const reviewFileDragDepthRef = useRef(0);
   const avatarInputRef = useRef(null);
-  const accountMenuRef = useRef(null);
+  const courseImportFileInputRef = useRef(null);
   const bootstrapStartedRef = useRef("");
   const legacyFileMigrationStartedRef = useRef("");
   const didInitHistoryRef = useRef(false);
@@ -2312,19 +2805,6 @@ export default function SemesterStudyHub() {
       setSelectedStatusHistoryWeekNumber(null);
     }
   }, [page, selectedCourseId, selectedReviewId]);
-
-  useEffect(() => {
-    if (!showAccountMenu) return undefined;
-
-    const handlePointerDown = (event) => {
-      if (accountMenuRef.current && !accountMenuRef.current.contains(event.target)) {
-        setShowAccountMenu(false);
-      }
-    };
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    return () => window.removeEventListener("pointerdown", handlePointerDown);
-  }, [showAccountMenu]);
 
   useEffect(() => {
     setCollapsedCourseFileGroups({});
@@ -3115,10 +3595,16 @@ export default function SemesterStudyHub() {
             {SUPPORT_EMAIL}
           </a>
         </div>
-        <MotionButton onClick={() => runWithStatusGuard(() => logoutUser())} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
-          <LogOut className="h-4 w-4" />
-          退出当前账号
-        </MotionButton>
+        <div className="flex flex-wrap gap-3">
+          <MotionButton onClick={() => runWithStatusGuard(() => switchAccount())} className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+            <User className="h-4 w-4" />
+            切换账号
+          </MotionButton>
+          <MotionButton onClick={() => runWithStatusGuard(() => logoutUser())} className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+            <LogOut className="h-4 w-4" />
+            退出当前账号
+          </MotionButton>
+        </div>
       </div>
     ) : (
       <div className="space-y-4">
@@ -3389,7 +3875,6 @@ export default function SemesterStudyHub() {
   }
 
   function openChangeEmailModal() {
-    setShowAccountMenu(false);
     setChangeEmailForm({ email: "" });
     setChangeEmailError("");
     setChangeEmailInfo("");
@@ -3397,13 +3882,11 @@ export default function SemesterStudyHub() {
   }
 
   function openAccountCenter(section = "profile") {
-    setShowAccountMenu(false);
     setAccountSection(section);
     navigateToPage("account");
   }
 
   function openChangePasswordModal() {
-    setShowAccountMenu(false);
     setChangePasswordForm({ password: "", confirmPassword: "" });
     setChangePasswordError("");
     setChangePasswordInfo("");
@@ -3595,7 +4078,6 @@ export default function SemesterStudyHub() {
     if (!supabase) return;
     try {
       await supabase.auth.signOut();
-      setShowAccountMenu(false);
       setCourses([]);
       setReviews([]);
       setPage("overview");
@@ -3774,9 +4256,28 @@ export default function SemesterStudyHub() {
     });
   }
 
+  function openCourseImportModal() {
+    runWithStatusGuard(() => {
+      setCourseImportError("");
+      setCourseImportInfo("提示：像完整课表那样同时带有星期、时间、课程名、教室或地点的信息，识别会更精准也更齐全。");
+      setShowCourseImportModal(true);
+    });
+  }
+
   function closeCourseModal() {
     setShowCreateModal(false);
     resetCourseForm();
+  }
+
+  function closeCourseImportModal() {
+    setShowCourseImportModal(false);
+    setCourseImportText("");
+    setPreparedCourseImportCourses([]);
+    setPreparedCourseImportSkippedLines([]);
+    setRecognizedCourseImports([]);
+    setCourseImportSkippedLines([]);
+    setCourseImportError("");
+    setCourseImportInfo("");
   }
 
   function openReviewModal() {
@@ -3861,6 +4362,164 @@ export default function SemesterStudyHub() {
         scheduleEntries: currentEntries.filter((_, entryIndex) => entryIndex !== index),
       };
     });
+  }
+
+  function updateRecognizedCourseImport(index, field, value) {
+    setRecognizedCourseImports((prev) =>
+      prev.map((course, courseIndex) =>
+        courseIndex === index
+          ? {
+              ...course,
+              [field]: value,
+            }
+          : course
+      )
+    );
+  }
+
+  function addRecognizedCourseScheduleEntry(index) {
+    setRecognizedCourseImports((prev) =>
+      prev.map((course, courseIndex) =>
+        courseIndex === index
+          ? {
+              ...course,
+              scheduleEntries: [...(course.scheduleEntries || []), { ...EMPTY_SCHEDULE_ENTRY }],
+            }
+          : course
+      )
+    );
+  }
+
+  function updateRecognizedCourseScheduleEntry(courseIndex, scheduleIndex, field, value) {
+    setRecognizedCourseImports((prev) =>
+      prev.map((course, currentCourseIndex) =>
+        currentCourseIndex === courseIndex
+          ? {
+              ...course,
+              scheduleEntries: (course.scheduleEntries || []).map((entry, currentScheduleIndex) =>
+                currentScheduleIndex === scheduleIndex
+                  ? {
+                      ...entry,
+                      [field]: field === "time" ? formatTimeRangeInput(value) : value,
+                    }
+                  : entry
+              ),
+            }
+          : course
+      )
+    );
+  }
+
+  function removeRecognizedCourseScheduleEntry(courseIndex, scheduleIndex) {
+    setRecognizedCourseImports((prev) =>
+      prev.map((course, currentCourseIndex) => {
+        if (currentCourseIndex !== courseIndex) return course;
+        const currentEntries = course.scheduleEntries || [];
+        if (currentEntries.length <= 1) return course;
+        return {
+          ...course,
+          scheduleEntries: currentEntries.filter((_, entryIndex) => entryIndex !== scheduleIndex),
+        };
+      })
+    );
+  }
+
+  function removeRecognizedCourseImport(index) {
+    setRecognizedCourseImports((prev) => prev.filter((_, courseIndex) => courseIndex !== index));
+  }
+
+  async function handleCourseImportFileChange(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    try {
+      const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+      if (isPdf) {
+        const result = await extractCourseImportsFromPdfFile(file);
+        setCourseImportText(result.text);
+        setPreparedCourseImportCourses(result.courses);
+        setPreparedCourseImportSkippedLines(result.skippedLines);
+        setCourseImportInfo(`已读取 PDF：${file.name}。这次会优先按版式坐标识别，不只依赖纯文本。`);
+      } else {
+        const text = await file.text();
+        setCourseImportText(text);
+        setPreparedCourseImportCourses([]);
+        setPreparedCourseImportSkippedLines([]);
+        setCourseImportInfo(`已读取文件：${file.name}`);
+      }
+      setCourseImportError("");
+    } catch (error) {
+      setPreparedCourseImportCourses([]);
+      setPreparedCourseImportSkippedLines([]);
+      setCourseImportError(error?.message || "读取课表文件失败，请改用复制粘贴。");
+    }
+  }
+
+  function recognizeCourseImport() {
+    const text = courseImportText.trim();
+    if (!text) {
+      setCourseImportError("请先粘贴课表文本，或者上传一个 pdf / txt / csv 文件。");
+      return;
+    }
+
+    const { courses: parsedCourses, skippedLines } = preparedCourseImportCourses.length
+      ? {
+          courses: preparedCourseImportCourses,
+          skippedLines: preparedCourseImportSkippedLines,
+        }
+      : parseCourseImportText(text);
+    if (!parsedCourses.length) {
+      setRecognizedCourseImports([]);
+      setCourseImportSkippedLines(skippedLines);
+      setCourseImportError("没有识别出可导入的课程。请尽量保证每行同时包含星期、时间段和课程名称。");
+      return;
+    }
+
+    setRecognizedCourseImports(parsedCourses);
+    setCourseImportSkippedLines(skippedLines);
+    setCourseImportError("");
+    setCourseImportInfo(`已识别 ${parsedCourses.length} 门课程。确认后会直接导入到当前账号。`);
+  }
+
+  async function importRecognizedCourses() {
+    if (!recognizedCourseImports.length || isImportingCourses) return;
+    setIsImportingCourses(true);
+    setCourseImportError("");
+    setCourseImportInfo("");
+
+    try {
+      const existingKeys = new Set(courses.map((course) => courseIdentityKey(course)));
+      const incomingCourses = recognizedCourseImports
+        .map((course) =>
+          makeCourse({
+            name: (course.name || "").trim(),
+            teacher: (course.teacher || "").trim(),
+            kind: (course.kind || "Vorlesung").trim() || "Vorlesung",
+            scheduleEntries: normalizeScheduleEntries(course.scheduleEntries, course.weekdays, course.time || "").filter(
+              (entry) => entry.weekday && entry.time
+            ),
+            room: (course.room || "").trim(),
+          })
+        )
+        .filter((course) => course.name && course.scheduleEntries.length)
+        .filter((course) => !existingKeys.has(courseIdentityKey(course)));
+
+      if (!incomingCourses.length) {
+        setCourseImportInfo("可导入的课程为空，或者识别出的课程都已经存在了，没有重复导入。");
+        return;
+      }
+
+      await commitCourses([...courses, ...incomingCourses]);
+      showToast(`已导入 ${incomingCourses.length} 门课程。`);
+      closeCourseImportModal();
+      navigateToPage("courses");
+    } catch (error) {
+      console.error("Failed to import recognized courses.", error);
+      setCourseImportError(error?.message || "导入课表失败，请稍后再试。");
+    } finally {
+      setIsImportingCourses(false);
+    }
   }
 
   function updateReviewForm(field, value) {
@@ -5040,89 +5699,6 @@ export default function SemesterStudyHub() {
 
   return (
     <div className={classNames("min-h-screen bg-zinc-100 text-zinc-900 transition-colors", themeMode === "dark" ? "theme-dark" : "theme-light")}>
-      {isSupabaseConfigured ? (
-        <div ref={accountMenuRef} className="fixed right-3 top-3 z-[70] sm:right-6 sm:top-6">
-          <MotionButton
-            onClick={() => setShowAccountMenu((prev) => !prev)}
-            className="flex items-center gap-2 rounded-full border border-zinc-200 bg-white/95 px-2.5 py-2 shadow-lg backdrop-blur hover:bg-white sm:gap-3 sm:px-3"
-          >
-            <AccountAvatar src={currentUserAvatarUrl} label={currentDisplayName} className="h-10 w-10" textClassName="text-sm" />
-            <div className="hidden min-w-0 text-left sm:block">
-              <div className="max-w-[150px] truncate text-sm font-semibold text-zinc-900">{currentDisplayName || "未命名用户"}</div>
-              <div className="max-w-[150px] truncate text-xs text-zinc-500">{currentUserEmail || "个人账户"}</div>
-            </div>
-            <ChevronDown className={classNames("h-4 w-4 text-zinc-500 transition", showAccountMenu ? "rotate-180" : "")} />
-          </MotionButton>
-
-          <AnimatePresence>
-            {showAccountMenu ? (
-              <motion.div
-                initial={{ opacity: 0, y: -8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.16 }}
-                className="mt-3 w-[min(18rem,calc(100vw-1.5rem))] rounded-3xl border border-zinc-200 bg-white p-3.5 shadow-2xl sm:w-[280px] sm:p-4"
-              >
-                <div className="flex items-center gap-3">
-                  <AccountAvatar src={currentUserAvatarUrl} label={currentDisplayName} className="h-12 w-12" textClassName="text-base" />
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold text-zinc-900">{currentDisplayName || "未命名用户"}</div>
-                    <div className="truncate text-xs leading-5 text-zinc-500">{currentUserEmail || "当前登录账户"}</div>
-                  </div>
-                </div>
-
-                <div className="mt-4 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm leading-6 text-zinc-600">
-                  退出当前账号后，会直接回到注册 / 登录页面。
-                </div>
-                {currentUserHasLegacyEmail ? (
-                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
-                    当前账号还是旧版内部邮箱。建议尽快改绑真实邮箱，之后忘记密码才能通过邮件找回。
-                  </div>
-                ) : null}
-
-                <div className="mt-4 flex flex-col gap-2">
-                  <MotionButton
-                    onClick={() => openAccountCenter("profile")}
-                    className="inline-flex items-center justify-center rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800"
-                  >
-                    进入用户中心
-                  </MotionButton>
-                  <MotionButton
-                    onClick={openChangeEmailModal}
-                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-                  >
-                    修改绑定邮箱
-                  </MotionButton>
-                  <MotionButton
-                    onClick={openChangePasswordModal}
-                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-                  >
-                    修改密码
-                  </MotionButton>
-                  <MotionButton
-                    onClick={() => runWithStatusGuard(() => switchAccount())}
-                    className="inline-flex items-center justify-center rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800"
-                  >
-                    切换账号
-                  </MotionButton>
-                  <MotionButton
-                    onClick={() => runWithStatusGuard(() => logoutUser())}
-                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-                  >
-                    退出当前账号
-                  </MotionButton>
-                  <MotionButton
-                    onClick={() => setShowAccountMenu(false)}
-                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-                  >
-                    关闭
-                  </MotionButton>
-                </div>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
-        </div>
-      ) : null}
       <ChangePasswordModal
         open={showChangePasswordModal}
         form={changePasswordForm}
@@ -5422,6 +5998,10 @@ export default function SemesterStudyHub() {
                   )}
                 >
                   批量删除
+                </MotionButton>
+                <MotionButton onClick={openCourseImportModal} className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 sm:w-auto">
+                  <Download className="h-4 w-4" />
+                  导入课表
                 </MotionButton>
                 <MotionButton onClick={openCreateModal} className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-zinc-900 px-3 py-3 text-sm font-medium text-white hover:bg-zinc-800 sm:w-auto">
                   <Plus className="h-4 w-4" />
@@ -6052,6 +6632,178 @@ export default function SemesterStudyHub() {
             {reviewFilesContent}
           </div>
         ) : null}
+      </Modal>
+
+      <Modal open={showCourseImportModal} onClose={closeCourseImportModal} title="导入课表识别课程">
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-sm leading-6 text-zinc-600">
+            支持直接粘贴课表文本，或上传 `.pdf / .txt / .csv` 文件。像你给的这种按星期分栏、同时带日期范围、时间、教室和地点的完整课表，识别会更精准也更齐全。如果只有课程名和时间，也会尽量识别课程名、星期和时间。
+            <div className="mt-2 text-xs text-zinc-500">现在也支持直接上传 PDF，系统会优先按 PDF 的版式坐标识别星期列和时间块，不再只靠摊平后的纯文本。</div>
+            <div className="mt-3 rounded-2xl border border-zinc-200 bg-white p-3 font-mono text-xs text-zinc-500">
+              Montag 10:00-12:00 Multimediaprogrammierung Vorlesung S 002
+              <br />
+              Dienstag 14:00-16:00 Statistik II Übung E 004
+            </div>
+          </div>
+
+          <textarea
+            value={courseImportText}
+            onChange={(event) => {
+              setCourseImportText(event.target.value);
+              setPreparedCourseImportCourses([]);
+              setPreparedCourseImportSkippedLines([]);
+              setCourseImportError("");
+              setCourseImportInfo("");
+            }}
+            placeholder="把课表文本粘贴到这里，每行一条安排。"
+            className="min-h-[180px] w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+          />
+
+          <div className="flex flex-wrap gap-3">
+            <input ref={courseImportFileInputRef} type="file" accept=".pdf,.txt,.csv,application/pdf,text/plain,text/csv" className="hidden" onChange={handleCourseImportFileChange} />
+            <MotionButton onClick={() => courseImportFileInputRef.current?.click()} className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+              读取课表文件
+            </MotionButton>
+            <MotionButton onClick={recognizeCourseImport} className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800">
+              识别课表
+            </MotionButton>
+          </div>
+
+          {courseImportError ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{courseImportError}</div> : null}
+          {courseImportInfo ? <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{courseImportInfo}</div> : null}
+
+          {recognizedCourseImports.length ? (
+            <div className="space-y-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-900">识别预览</div>
+                  <div className="text-xs text-zinc-500">导入前可以直接修改课程名、类型、教室和时间，也可以删除误识别条目。</div>
+                </div>
+              </div>
+              {recognizedCourseImports.map((course, index) => (
+                <div key={`${course.name}-${index}`} className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="grid flex-1 gap-3 md:grid-cols-2">
+                      <label className="block md:col-span-2">
+                        <div className="mb-2 text-xs font-medium text-zinc-600">课程名称</div>
+                        <input
+                          value={course.name || ""}
+                          onChange={(event) => updateRecognizedCourseImport(index, "name", event.target.value)}
+                          placeholder="课程名称"
+                          className="w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-zinc-400"
+                        />
+                      </label>
+                      <label className="block">
+                        <div className="mb-2 text-xs font-medium text-zinc-600">课程类型</div>
+                        <select
+                          value={course.kind || "Vorlesung"}
+                          onChange={(event) => updateRecognizedCourseImport(index, "kind", event.target.value)}
+                          className="w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-zinc-400"
+                        >
+                          <option>Vorlesung</option>
+                          <option>Seminar</option>
+                          <option>Übung</option>
+                          <option>Kolloquium</option>
+                          <option>Praktikum</option>
+                        </select>
+                      </label>
+                      <label className="block">
+                        <div className="mb-2 text-xs font-medium text-zinc-600">教室 / 地点</div>
+                        <input
+                          value={course.room || ""}
+                          onChange={(event) => updateRecognizedCourseImport(index, "room", event.target.value)}
+                          placeholder="例如：S 002 · Schellingstr. 3 (S)"
+                          className="w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-zinc-400"
+                        />
+                      </label>
+                      <label className="block md:col-span-2">
+                        <div className="mb-2 text-xs font-medium text-zinc-600">备注 / 教师</div>
+                        <input
+                          value={course.teacher || ""}
+                          onChange={(event) => updateRecognizedCourseImport(index, "teacher", event.target.value)}
+                          placeholder="可选"
+                          className="w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-zinc-400"
+                        />
+                      </label>
+                    </div>
+                    <MotionButton
+                      type="button"
+                      onClick={() => removeRecognizedCourseImport(index)}
+                      className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
+                    >
+                      删除这条
+                    </MotionButton>
+                  </div>
+
+                  <div className="mt-4 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs font-medium text-zinc-600">上课时间</div>
+                      <MotionButton
+                        type="button"
+                        onClick={() => addRecognizedCourseScheduleEntry(index)}
+                        className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-100"
+                      >
+                        <Plus className="h-4 w-4" />
+                        添加时间
+                      </MotionButton>
+                    </div>
+                    <div className="space-y-3">
+                      {(course.scheduleEntries || []).map((entry, scheduleIndex) => (
+                        <div key={`${entry.weekday}-${scheduleIndex}`} className="grid gap-3 rounded-2xl border border-zinc-200 bg-white p-3 md:grid-cols-[180px_minmax(0,1fr)_auto]">
+                          <select
+                            value={entry.weekday}
+                            onChange={(event) => updateRecognizedCourseScheduleEntry(index, scheduleIndex, "weekday", event.target.value)}
+                            className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                          >
+                            {DAY_ORDER.map((day) => (
+                              <option key={day} value={day}>
+                                {day}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            value={entry.time}
+                            onChange={(event) => updateRecognizedCourseScheduleEntry(index, scheduleIndex, "time", event.target.value)}
+                            placeholder="xx:xx - xx:xx"
+                            inputMode="numeric"
+                            className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                          />
+                          <MotionButton
+                            type="button"
+                            onClick={() => removeRecognizedCourseScheduleEntry(index, scheduleIndex)}
+                            disabled={(course.scheduleEntries || []).length <= 1}
+                            className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            删除
+                          </MotionButton>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {courseImportSkippedLines.length ? (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              有 {courseImportSkippedLines.length} 行没有被识别。通常是因为缺少星期、时间段或课程名称。
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap gap-3">
+            <MotionButton
+              onClick={importRecognizedCourses}
+              disabled={!recognizedCourseImports.length || isImportingCourses}
+              className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+            >
+              {isImportingCourses ? "导入中..." : `导入识别出的 ${recognizedCourseImports.length} 门课程`}
+            </MotionButton>
+            <MotionButton onClick={closeCourseImportModal} className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+              关闭
+            </MotionButton>
+          </div>
+        </div>
       </Modal>
 
       <Modal open={showCreateModal} onClose={closeCourseModal} title={editingCourseId ? "编辑课程" : "新建课程"}>
