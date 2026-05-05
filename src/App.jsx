@@ -1060,9 +1060,11 @@ function groupFiles(files = []) {
 
 function readLocalCoursesFromStorage(scope = "") {
   try {
-    const sources = scope
+    const scopedSources = scope
       ? [localStorage.getItem(getScopedStorageKey(STORAGE_KEY, scope)), ...LEGACY_KEYS.map((key) => localStorage.getItem(getScopedStorageKey(key, scope)))]
-      : [localStorage.getItem(STORAGE_KEY), ...LEGACY_KEYS.map((key) => localStorage.getItem(key))];
+      : [];
+    const fallbackSources = [localStorage.getItem(STORAGE_KEY), ...LEGACY_KEYS.map((key) => localStorage.getItem(key))];
+    const sources = [...scopedSources, ...fallbackSources];
     const availableSources = sources.filter(Boolean);
     const source = availableSources[0];
     if (!source) return [];
@@ -1075,7 +1077,8 @@ function readLocalCoursesFromStorage(scope = "") {
 
 function readLocalReviewsFromStorage(scope = "") {
   try {
-    const source = scope ? localStorage.getItem(getScopedStorageKey(REVIEW_STORAGE_KEY, scope)) : localStorage.getItem(REVIEW_STORAGE_KEY);
+    const scopedSource = scope ? localStorage.getItem(getScopedStorageKey(REVIEW_STORAGE_KEY, scope)) : null;
+    const source = scopedSource || localStorage.getItem(REVIEW_STORAGE_KEY);
     if (!source) return [];
     const parsed = JSON.parse(source);
     return Array.isArray(parsed) ? parsed.map(normalizeReviewItem).filter(Boolean) : [];
@@ -1087,6 +1090,15 @@ function readLocalReviewsFromStorage(scope = "") {
 function buildEntityFilesMap(items = []) {
   return items.reduce((acc, item) => {
     acc[item.id] = item.files || [];
+    return acc;
+  }, {});
+}
+
+function buildEntityFilesMapByIdentity(items = [], getIdentityKey) {
+  return items.reduce((acc, item) => {
+    const key = getIdentityKey(item);
+    if (!key) return acc;
+    acc[key] = mergeFileLists(acc[key] || [], item.files || []);
     return acc;
   }, {});
 }
@@ -2599,6 +2611,8 @@ export default function SemesterStudyHub() {
     async function fetchRemoteDataset(localCourses, localReviews) {
       const localCourseFilesMap = buildEntityFilesMap(localCourses);
       const localReviewFilesMap = buildEntityFilesMap(localReviews);
+      const localCourseFilesByIdentity = buildEntityFilesMapByIdentity(localCourses, courseIdentityKey);
+      const localReviewFilesByIdentity = buildEntityFilesMapByIdentity(localReviews, reviewIdentityKey);
 
       const { data: courseRows, error: coursesError } = await supabase.from("courses").select("*").order("created_at", { ascending: true });
       if (coursesError) throw coursesError;
@@ -2631,24 +2645,44 @@ export default function SemesterStudyHub() {
 
       return {
         courses: dedupeCourses((courseRows || []).map((courseRow) =>
-          hydrateCourseFromRemote(
-            courseRow,
-            (courseWeeklyRows || []).filter((record) => record.course_id === courseRow.id),
-            mergeFileLists(
-              (courseFileRows || []).filter((row) => row.course_id === courseRow.id).map(buildCourseFileMetaFromRow),
-              localCourseFilesMap[courseRow.id] || []
-            )
-          )
+          {
+            const identityKey = courseIdentityKey({
+              name: courseRow.name,
+              teacher: courseRow.teacher,
+              kind: courseRow.kind,
+              weekdays: courseRow.weekdays,
+              time: courseRow.time,
+              room: courseRow.room,
+              archived: courseRow.archived,
+            });
+            const remoteFiles = (courseFileRows || []).filter((row) => row.course_id === courseRow.id).map(buildCourseFileMetaFromRow);
+            const mergedLocalFiles = mergeFileLists(localCourseFilesMap[courseRow.id] || [], localCourseFilesByIdentity[identityKey] || []);
+            return hydrateCourseFromRemote(
+              courseRow,
+              (courseWeeklyRows || []).filter((record) => record.course_id === courseRow.id),
+              mergeFileLists(remoteFiles, mergedLocalFiles)
+            );
+          }
         )),
         reviews: dedupeReviews((reviewRows || []).map((reviewRow) =>
-          hydrateReviewFromRemote(
-            reviewRow,
-            (reviewWeeklyRows || []).filter((record) => record.review_id === reviewRow.id),
-            mergeFileLists(
-              (reviewFileRows || []).filter((row) => row.review_id === reviewRow.id).map(buildReviewFileMetaFromRow),
-              localReviewFilesMap[reviewRow.id] || []
-            )
-          )
+          {
+            const identityKey = reviewIdentityKey({
+              name: reviewRow.name,
+              subject: reviewRow.subject,
+              sourceCourseId: reviewRow.source_course_id || "",
+              weekdays: reviewRow.weekdays,
+              time: reviewRow.time,
+              room: reviewRow.room,
+              archived: reviewRow.archived,
+            });
+            const remoteFiles = (reviewFileRows || []).filter((row) => row.review_id === reviewRow.id).map(buildReviewFileMetaFromRow);
+            const mergedLocalFiles = mergeFileLists(localReviewFilesMap[reviewRow.id] || [], localReviewFilesByIdentity[identityKey] || []);
+            return hydrateReviewFromRemote(
+              reviewRow,
+              (reviewWeeklyRows || []).filter((record) => record.review_id === reviewRow.id),
+              mergeFileLists(remoteFiles, mergedLocalFiles)
+            );
+          }
         )),
       };
     }
